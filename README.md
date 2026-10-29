@@ -1,6 +1,6 @@
 # 안전벨트를 채운 AI 튜터 — 교육 자료 근거 튜터 + 가드레일
 
-AI Bootcamp Innovation Challenger 2026 (엘리스그룹 주제) 팀 저장소입니다.
+AI Bootcamp Innovation Challenger 2026 (엘리스그룹 주제) 팀 저장소입니다. 비공개 저장소이니 링크나 내용을 팀 밖에 공유하지 마세요.
 
 > **공식 주제:** 교육 자료에 근거한 정확한 학습 지원과, 범위 이탈 및 유해 요청 차단을 동시에 달성하는 튜터 에이전트 및 가드레일 설계
 
@@ -35,7 +35,7 @@ AI Bootcamp Innovation Challenger 2026 (엘리스그룹 주제) 팀 저장소입
 ### 1-1. 저장소 받기
 
 ```powershell
-git clone https://github.com/<GitHub-계정>/ai_turtor_guardrail.git
+git clone https://github.com/AI-Challenger-2026/ai_turtor_guardrail.git
 cd ai_turtor_guardrail
 ```
 

@@ -37,3 +37,4 @@
 | 날짜 | 작업 |
 | --- | --- |
 | 2026-10-29 | 팀 저장소 정리: `.gitignore`에 `backend/data/official/` 추가(규칙 13), 팀원용 README·CONTRIBUTING·NEXT_TASKS 작성, 실제 API 실험 보고서 A·B 포함 |
+| 2026-10-29 | GitHub 업로드: `AI-Challenger-2026/ai_turtor_guardrail` (비공개) |

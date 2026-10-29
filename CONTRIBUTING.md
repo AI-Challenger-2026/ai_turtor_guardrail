@@ -7,6 +7,7 @@
 ## 1. 처음 한 번만
 
 1. [README.md](README.md) 1장대로 설치합니다. `pytest`에서 **130 passed**가 나오면 준비가 끝난 것입니다.
+   - 조직 멤버는 기본으로 **읽기 권한**만 있습니다. 브랜치를 push하려면 저장소 관리자에게 쓰기 권한을 요청하세요.
 2. git 작성자 정보를 설정합니다. 커밋에 이 이름이 남습니다.
    ```powershell
    git config --global user.name "내 이름"
