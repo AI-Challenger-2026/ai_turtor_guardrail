@@ -1,0 +1,2 @@
+# Normalize line endings in the repo so Windows/macOS teammates don't produce whole-file diffs
+* text=auto

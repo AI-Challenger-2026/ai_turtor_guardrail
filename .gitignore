@@ -1,0 +1,41 @@
+# 비밀값 (secrets) — API 키는 각자 backend/.env 에만 둔다
+.env
+**/.env
+.env.*
+**/.env.*
+!**/.env.example
+
+# 엘리스 공식 데이터 (기밀, CLAUDE.md 규칙 13) — git 에 올리지 않는다
+backend/data/official/
+
+# Python
+.venv/
+**/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+node_modules/
+**/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# 실행 산출물 (runtime outputs)
+backend/logs/*
+!backend/logs/.gitkeep
+backend/reports/*
+!backend/reports/.gitkeep
+# 팀 공유용 실제 API 실험 보고서 (2026-10-18, 구성 A·B) — 새 보고서는 올라가지 않는다
+!backend/reports/20261018-215354_none/
+!backend/reports/20261018-215020_none/
+backend/data/index/
+
+# Claude Code 개인 설정
+.claude/settings.local.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,52 @@
+# InputRuleGuard 정규식 규칙 (regex rules). 대소문자 무시(IGNORECASE)로 매칭한다.
+# category 는 refusal_templates.yaml 의 refusals 키와 맞춘다 (jailbreak, pii 등).
+# 오탐(false positive)을 줄이려고 "명령형" 표현 위주로 잡는다. 수정 후 pytest 로 회귀 확인할 것.
+
+rules:
+  - id: ignore_instructions
+    category: jailbreak
+    description: 이전 지시·규칙을 무시하라는 요구
+    patterns:
+      - '(이전|앞|위|기존|원래|모든|지금까지|시스템)\S*\s*(\S+\s*){0,3}(지시|지침|명령|규칙|프롬프트|설정|제약)\S*\s*(\S+\s*){0,2}(무시해|무시하고|무시하라|무시할 것|잊어\s*(줘|버려|라)|잊고|따르지\s*(마|말고))'
+      - 'ignore\s+(all\s+|any\s+)?(the\s+|your\s+)?(previous|prior|above|earlier|system)\s+(instructions?|rules?|prompts?|directions?)'
+      - 'disregard\s+(all\s+|any\s+)?(the\s+|your\s+)?(previous|prior|above|earlier)'
+      - 'forget\s+(all\s+)?(your|the|previous)\s+(instructions?|rules?)'
+
+  - id: role_override
+    category: jailbreak
+    description: 역할 전환·제한 해제 요구
+    patterns:
+      - '\b(DAN|do\s+anything\s+now)\b'
+      - '(개발자|관리자|디버그|탈옥|무제한|갓)\s*모드'
+      - '(developer|debug|god|jailbreak|unrestricted)\s+mode'
+      - '(제한|규칙|필터|검열|윤리|안전장치)\s*(이|가|을|를|은|는)?\s*(없는|없이|해제|풀린|풀어|꺼|끄고)'
+      - 'you\s+are\s+(now|no\s+longer)\b'
+      - 'pretend\s+(to\s+be|you\s+are)'
+      - '(너는|넌|당신은)\s*(이제|지금부터|앞으로)\s*(더\s*이상\s*)?(튜터가\s*아니|AI가\s*아니|아무\s*제한)'
+
+  - id: system_prompt_leak
+    category: jailbreak
+    description: 시스템 프롬프트·내부 지시 공개 요구
+    patterns:
+      - '(시스템|system|초기|숨겨진|내부|개발자)\s*(프롬프트|prompt|지시문?|지침|메시지|설정)\S*\s*(\S+\s*){0,3}(보여|알려|출력|공개|말해|복사|그대로|print|show|reveal)'
+      - '(reveal|show|print|repeat|output|display)\s+(me\s+)?(your|the)\s+(system\s+|initial\s+|hidden\s+)?(prompt|instructions)'
+      - '(위|앞)의?\s*(모든\s*)?(내용|지시|텍스트|문장)\S*\s*(그대로|전부|토씨\s*하나)\s*(출력|반복|복사|말해)'
+      - '(네가|너가|니가|당신이|AI가)\s*(처음에\s*)?받은\s*(지시|지침|명령|프롬프트|설정|규칙)'
+
+  - id: pii_rrn
+    category: pii
+    description: 주민등록번호
+    patterns:
+      - '\b\d{6}\s*-\s*[1-8]\d{6}\b'
+
+  - id: pii_phone
+    category: pii
+    description: 휴대전화 번호
+    patterns:
+      - '\b01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}\b'
+
+  - id: pii_card
+    category: pii
+    description: 카드 번호
+    patterns:
+      - '\b(?:\d{4}[-\s]){3}\d{4}\b'

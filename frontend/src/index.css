@@ -1,0 +1,124 @@
+/* 코드 블록 하이라이트 테마 (highlight.js theme) */
+@import 'highlight.js/styles/github.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-slate-50 font-sans text-slate-800 antialiased;
+    /* 한글 줄바꿈: 단어 단위 유지 (word-break keep-all) */
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+}
+
+@layer components {
+  /* 답변 본문 마크다운 스타일 (prose overrides) */
+  .tutor-prose {
+    @apply prose prose-slate max-w-none text-[15px] leading-7;
+  }
+
+  .tutor-prose :where(pre) {
+    @apply my-3 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50 p-0 text-[13px] leading-6 text-slate-800;
+  }
+
+  .tutor-prose :where(pre code) {
+    @apply block bg-transparent p-4 font-mono;
+  }
+
+  /* 인라인 코드 (inline code) — 백틱 기호 제거 */
+  .tutor-prose :where(:not(pre) > code) {
+    @apply rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] font-medium text-slate-800;
+  }
+
+  .tutor-prose :where(:not(pre) > code)::before,
+  .tutor-prose :where(:not(pre) > code)::after {
+    content: none;
+  }
+
+  /* GFM 표 가로 스크롤 래퍼 (table scroll wrapper) */
+  .tutor-prose .table-wrap {
+    @apply my-3 overflow-x-auto rounded-xl border border-slate-200;
+  }
+
+  .tutor-prose .table-wrap table {
+    @apply my-0 w-full text-sm;
+  }
+
+  .tutor-prose .table-wrap thead {
+    @apply bg-slate-50;
+  }
+
+  .tutor-prose .table-wrap th,
+  .tutor-prose .table-wrap td {
+    @apply px-3 py-2;
+  }
+
+  /* 하이라이트 테마 배경을 카드 배경과 맞춤 (override hljs background) */
+  .tutor-prose pre code.hljs {
+    background: transparent;
+    padding: 1rem;
+  }
+}
+
+/* 타이핑 점 애니메이션 (typing dots) */
+@keyframes tutor-bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.typing-dot {
+  animation: tutor-bounce 1.2s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* 출처 카드로 이동 시 잠깐 강조 (citation flash highlight) */
+@keyframes cite-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 8px rgba(79, 70, 229, 0);
+  }
+}
+
+.cite-flash {
+  animation: cite-flash 1s ease-out 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot,
+  .cite-flash {
+    animation: none;
+  }
+}
+
+/* 모바일 주소창 변화에 맞춘 동적 뷰포트 높이 (dynamic viewport height) */
+@supports (height: 100dvh) {
+  #root {
+    height: 100dvh;
+  }
+}
