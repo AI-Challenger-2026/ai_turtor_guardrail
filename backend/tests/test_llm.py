@@ -85,11 +85,11 @@ def test_usage_scope_records_calls():
     assert calls[0]["ok"] is True
 
 
-def test_elice_provider_reports_not_implemented():
+def test_elice_provider_requires_endpoint_and_key():
     p = EliceProvider("elice-model")
-    with pytest.raises(LLMNotImplementedError) as info:
+    with pytest.raises(Exception) as info:
         p.generate("s", [{"role": "user", "content": "q"}])
-    assert info.value.http_status == 501
+    assert "ELICE_API_BASE" in info.value.user_message
 
 
 def test_factory_mock_mode_routes_everything_to_mock(settings):

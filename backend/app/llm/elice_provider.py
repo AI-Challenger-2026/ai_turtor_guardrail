@@ -1,17 +1,19 @@
-"""엘리스 ML API 제공자 자리 (Elice ML API provider — placeholder).
-
-대회 개발 환경(엘리스 Helpy Code, ML API)이 공개되면 여기를 구현한다.
-연결 지점 (integration points):
-  1. ELICE_API_BASE, ELICE_API_KEY 환경변수로 엔드포인트와 키를 받는다 (settings.py 에 이미 정의됨).
-  2. _complete() 에서 HTTP 요청을 보내고 RawCompletion(text, input_tokens, output_tokens, stop_reason)을 채운다.
-  3. 인증 실패/429/타임아웃을 app.errors 의 LLMAuthError/LLMRateLimitError/LLMTimeoutError 로 변환한다.
-  4. GENERATOR_PROVIDER=elice 또는 JUDGE_PROVIDER=elice 로 선택한다 (factory.py).
-현재는 선택되면 "미구현" 오류(HTTP 501)를 명확히 반환한다.
-"""
+"""Elice ML API provider."""
 
 from __future__ import annotations
 
-from app.errors import LLMNotImplementedError
+from typing import Any
+
+import httpx
+
+from app.errors import (
+    LLMAPIError,
+    LLMAuthError,
+    LLMConnectionError,
+    LLMRateLimitError,
+    LLMRefusalError,
+    LLMTimeoutError,
+)
 from app.llm.base import LLMProvider, ProviderOptions, RawCompletion
 
 
@@ -20,12 +22,98 @@ class EliceProvider(LLMProvider):
 
     def __init__(self, model: str, options: ProviderOptions | None = None, *, api_key: str = "", api_base: str = "") -> None:
         super().__init__(model, options)
-        self.api_base = api_base
-        self._has_key = bool(api_key)
+        self.api_base = api_base.rstrip("/")
+        self._api_key = api_key
+
+    @staticmethod
+    def _text(data: Any) -> str:
+        if isinstance(data, str):
+            return data
+        if not isinstance(data, dict):
+            return ""
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            choice = choices[0]
+            if isinstance(choice, dict):
+                message = choice.get("message")
+                if isinstance(message, dict) and message.get("content") is not None:
+                    content = message["content"]
+                    if isinstance(content, list):
+                        return "".join(str(x.get("text", "")) if isinstance(x, dict) else str(x) for x in content)
+                    return str(content)
+                if choice.get("text") is not None:
+                    return str(choice["text"])
+        for key in ("text", "output", "response", "answer"):
+            if isinstance(data.get(key), str):
+                return data[key]
+        return ""
+
+    @staticmethod
+    def _usage(data: Any) -> tuple[int, int]:
+        usage = data.get("usage", {}) if isinstance(data, dict) else {}
+        if not isinstance(usage, dict):
+            return 0, 0
+        return int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0), int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
 
     def _complete(self, system, messages, temperature, max_tokens, json_mode, task) -> RawCompletion:  # noqa: ANN001
-        raise LLMNotImplementedError(
-            "엘리스 ML API 연동은 아직 구현되지 않았습니다. GENERATOR_PROVIDER/JUDGE_PROVIDER 를 anthropic 으로 바꾸거나 "
-            "MOCK_MODE=true 로 실행해 주세요.",
-            detail="EliceProvider._complete is not implemented yet",
+        if not self.api_base:
+            raise LLMAPIError("ELICE_API_BASE가 설정되지 않았습니다.", detail="ELICE_API_BASE is empty")
+        if not self._api_key:
+            raise LLMAuthError("ELICE_API_KEY가 설정되지 않았습니다.", detail="ELICE_API_KEY is empty")
+
+        request_messages: list[dict[str, str]] = []
+        if system:
+            request_messages.append({"role": "system", "content": system})
+        request_messages.extend(messages)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": request_messages,
+            "max_completion_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        try:
+            response = httpx.post(self.api_base, json=payload, headers=headers, timeout=self.options.timeout_s)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(detail=f"{type(exc).__name__}: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise LLMConnectionError(detail=f"{type(exc).__name__}: {exc}") from exc
+
+        detail = response.text[:500]
+        if response.status_code in (401, 403):
+            raise LLMAuthError(detail=detail)
+        if response.status_code == 429:
+            raise LLMRateLimitError(detail=detail)
+        if response.status_code >= 500:
+            raise LLMAPIError(retryable=True, detail=detail)
+        if response.status_code >= 400:
+            raise LLMAPIError(detail=detail)
+        try:
+            data: Any = response.json()
+        except ValueError as exc:
+            raise LLMAPIError("Elice API가 JSON 응답을 반환하지 않았습니다.", detail=detail) from exc
+        finish_reason = None
+        if isinstance(data, dict) and isinstance(data.get("choices"), list) and data["choices"]:
+            finish_reason = data["choices"][0].get("finish_reason")
+        if finish_reason in {"content_filter", "refusal"}:
+            raise LLMRefusalError(
+                category="content_filter" if finish_reason == "content_filter" else "model_refusal",
+                detail=f"Elice finish_reason={finish_reason}",
+            )
+        text = self._text(data)
+        if not text:
+            raise LLMAPIError("Elice API 응답에서 답변을 찾지 못했습니다.", detail=detail)
+        input_tokens, output_tokens = self._usage(data)
+        return RawCompletion(
+            text=text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            stop_reason=finish_reason,
+            model=(data.get("model") if isinstance(data, dict) else None) or self.model,
+            temperature_applied=True,
         )

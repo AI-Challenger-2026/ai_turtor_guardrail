@@ -38,8 +38,8 @@ class LLMParams(BaseModel):
 
 
 class LLMSection(BaseModel):
-    generator: LLMParams = LLMParams(temperature=0.3, max_tokens=4096)
-    judge: LLMParams = LLMParams(temperature=0.0, max_tokens=2048)
+    generator: LLMParams = LLMParams(temperature=0.3, max_tokens=2000)
+    judge: LLMParams = LLMParams(temperature=0.0, max_tokens=2000)
     rewriter: LLMParams = LLMParams(temperature=0.0, max_tokens=512)
     timeout_seconds: float = 60.0
     max_retries: int = 2
@@ -103,7 +103,7 @@ class Settings(BaseModel):
 
     answer_mode: AnswerMode = "adaptive"
     grounding_mode: GroundingMode = "general"
-    guard_profile: str = "none"
+    guard_profile: str = "default"
 
     max_message_chars: int = 2000
     max_turns: int = 20
