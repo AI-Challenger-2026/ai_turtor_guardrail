@@ -37,5 +37,13 @@ EMBED_STARTUP_TIMEOUT_S = 60.0
 EMBED_STARTUP_RETRIES = 2
 # Sections handed to the generator.
 RETRIEVE_K = 5
+# English questions: one minimal-effort translation call, run alongside the query embedding.
+TRANSLATE_TIMEOUT_S = 4.0
+TRANSLATE_MAX_TOKENS = 600
+# /guard checks over retrieved sections: candidate grounding (task 3) and "is it in the material".
+GROUND_EFFORT = "low"
+FOUND_EFFORT = "low"
+GUARD_JUDGE_MAX_TOKENS = 2000
+GUARD_JUDGE_RETRIES = 1
 
 ANSWER_MAX_CHARS = 4000

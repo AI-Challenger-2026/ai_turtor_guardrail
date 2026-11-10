@@ -149,19 +149,55 @@ def user_turns(messages: Sequence[Message]) -> List[str]:
     return [m.content for m in messages if m.role == "user"]
 
 
-def query_text(messages: Sequence[Message]) -> str:
+def query_text(messages: Sequence[Message], extra: str = "") -> str:
     # The whole conversation. Earlier turns, including the tutor's earlier answers (e.g. its
     # summary of the page), point at the page the learner is on, which is the cited section:
     # on the tuning split BM25 top-1 went from 0.83 (learner turns only) to 0.88.
-    return "\n".join(m.content for m in messages)
+    # `extra` is appended (the /guard candidate answer, whose claims name the topic).
+    return "\n".join([m.content for m in messages] + ([extra] if extra else []))
 
 
 # Embedding inputs are capped well under the model's input limit (long pastes keep head and tail).
 EMBED_QUERY_MAX_CHARS = 4000
 
 
-def embed_query_text(messages: Sequence[Message]) -> str:
-    return prompts.clip(query_text(messages), EMBED_QUERY_MAX_CHARS)
+def embed_query_text(messages: Sequence[Message], extra: str = "") -> str:
+    return prompts.clip(query_text(messages, extra), EMBED_QUERY_MAX_CHARS)
+
+
+# ---------------------------------------------------------------- English questions
+
+# Course terms for the translator, derived from the KB at import: section titles and the
+# course's own names (particles stripped). BM25 cannot match "Squirrel Teens debit card"
+# to "다람쥐 틴즈 체크카드", so English questions get a Korean rendering added to the query.
+_NAME = re.compile(r"(?:다람쥐|다람|꿈틀|도토리)\s?[가-힣]+(?:\s(?:통장|적금|정기예금|예금|체크카드|포인트|문구점|중학교|코딩 동아리|동아리|토끼))*")
+_PARTICLE = re.compile(r"(?:에게서|에게|에는|에서|으로|이고|이에요|예요|은|는|을|를|의|가|로|와|과|도|만)$")
+
+
+def build_glossary(sections: Dict[str, str]) -> str:
+    titles = [text.split("\n", 1)[0].lstrip("# ").split(" ", 1)[-1].strip() for text in sections.values()]
+    names = sorted({_PARTICLE.sub("", m.group(0)) for text in sections.values() for m in _NAME.finditer(text)})
+    return "\n".join(f"- {t}" for t in titles + names)
+
+
+GLOSSARY = build_glossary(SECTIONS)
+_LATIN = re.compile(r"[A-Za-z]")
+_HANGUL = re.compile(r"[가-힣]")
+
+
+def is_english(text: str) -> bool:
+    latin, hangul = len(_LATIN.findall(text)), len(_HANGUL.findall(text))
+    return latin >= 12 and latin > 2 * hangul
+
+
+async def korean_query(text: str) -> Optional[str]:
+    """Korean rendering of an English question with the course's terms; None on failure."""
+    system = prompts.TRANSLATE_SYSTEM.format(glossary=GLOSSARY)
+    out = await llm.chat_text("translate", [{"role": "system", "content": system},
+                                            {"role": "user", "content": prompts.clip(text, 1000)}],
+                              effort="minimal", max_tokens=config.TRANSLATE_MAX_TOKENS,
+                              timeout=config.TRANSLATE_TIMEOUT_S)
+    return out.strip() if out and out.strip() else None
 
 
 def rank_bm25(query: str) -> List[Tuple[str, float]]:
@@ -197,12 +233,21 @@ def combine(bm25: List[Tuple[str, float]], vector: List[Tuple[str, float]], k: i
     return out
 
 
-async def retrieve(messages: Sequence[Message], k: int = config.RETRIEVE_K) -> List[SectionHit]:
-    """Top-k sections for the conversation. Never raises; degrades to BM25 alone."""
-    vector: List[Tuple[str, float]] = []
-    if _VECTORS is not None:
-        qv = await embed_texts([embed_query_text(messages)], kind="embed_query", timeout=config.EMBED_QUERY_TIMEOUT_S)
-        if qv:
-            vector = rank_vector(qv[0])
+async def _none():
+    return None
+
+
+async def retrieve(messages: Sequence[Message], k: int = config.RETRIEVE_K, extra: str = "") -> List[SectionHit]:
+    """Top-k sections for the conversation (plus `extra` text). Never raises; degrades to BM25 alone.
+
+    The query embedding and, for an English last turn, its Korean rendering run concurrently.
+    """
+    turns = user_turns(messages)
+    embedding = (embed_texts([embed_query_text(messages, extra)], kind="embed_query",
+                             timeout=config.EMBED_QUERY_TIMEOUT_S) if _VECTORS is not None else _none())
+    korean = korean_query(turns[-1]) if turns and is_english(turns[-1]) else _none()
+    qv, translated = await asyncio.gather(embedding, korean)
+    vector = rank_vector(qv[0]) if qv else []
+    query = query_text(messages, extra) + (f"\n{translated}" if translated else "")
     return [SectionHit(section_id=sid, score=round(s, 6), text=SECTIONS[sid], kind=kind)
-            for sid, s, kind in combine(rank_bm25(query_text(messages)), vector, k)]
+            for sid, s, kind in combine(rank_bm25(query), vector, k)]

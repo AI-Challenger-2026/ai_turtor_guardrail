@@ -60,38 +60,71 @@ def gen_json(answer, found=True, citations=()):
 
 
 DEFAULT_GEN = gen_json(f"기본 답변 {MARKER}")
+DEFAULTS = {"classify": NORMAL_JSON, "generate": DEFAULT_GEN, "ground": '{"grounded": true, "unsupported": []}',
+            "found": '{"found": true}', "translate": "한국어 검색어"}
+
+
+def call_kind(call) -> str:
+    """Which component made a chat call, told apart by its system prompt."""
+    system = call["messages"][0]["content"]
+    if system == prompts.CLASSIFIER_SYSTEM:
+        return "classify"
+    if system == prompts.GROUND_SYSTEM:
+        return "ground"
+    if system == prompts.FOUND_SYSTEM:
+        return "found"
+    if system.startswith(prompts.TRANSLATE_SYSTEM.split("{", 1)[0]):
+        return "translate"
+    return "generate"
 
 
 def is_classify(call) -> bool:
-    return call["messages"][0]["content"] == prompts.CLASSIFIER_SYSTEM
+    return call_kind(call) == "classify"
 
 
 class FakeCompletions:
     """Scripted stand-in for client.chat.completions.
 
-    Classifier calls (system prompt == CLASSIFIER_SYSTEM) read `json_script`, default: a normal
-    verdict. Every other call (generation) reads `script`, default: a found=true answer JSON.
+    Each component has its own script (`scripts[kind]`), falling back to DEFAULTS[kind]:
+    `json_script` is the classifier's and `script` the generator's (any call that is not the
+    classifier, the guard judges or the translator).
     """
 
     def __init__(self):
-        self.script = []
-        self.json_script = []
+        self.scripts = {kind: [] for kind in DEFAULTS}
         self.calls = []
 
+    @property
+    def script(self):
+        return self.scripts["generate"]
+
+    @script.setter
+    def script(self, value):
+        self.scripts["generate"] = list(value)
+
+    @property
+    def json_script(self):
+        return self.scripts["classify"]
+
+    @json_script.setter
+    def json_script(self, value):
+        self.scripts["classify"] = list(value)
+
+    def calls_of(self, kind):
+        return [c for c in self.calls if call_kind(c) == kind]
+
     def gen_calls(self):
-        return [c for c in self.calls if not is_classify(c)]
+        return self.calls_of("generate")
 
     def json_calls(self):
-        return [c for c in self.calls if is_classify(c)]
+        return self.calls_of("classify")
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        if is_classify(kwargs):
-            default = NORMAL_JSON
-            kind, value = self.json_script.pop(0) if self.json_script else ("text", default)
-        else:
-            default = DEFAULT_GEN
-            kind, value = self.script.pop(0) if self.script else ("text", default)
+        kind_of_call = call_kind(kwargs)
+        default = DEFAULTS[kind_of_call]
+        queue = self.scripts[kind_of_call]
+        kind, value = queue.pop(0) if queue else ("text", default)
         if kind == "raise":
             raise value
         if kind == "sleep":
@@ -281,9 +314,10 @@ class GuardTests(Base):
         self.assertEqual(r.status_code, 200)
         self.assertIsNotNone(scoring.parse_guard(r.json(), True))
 
-    def test_guard_calls_only_the_classifier(self):
+    def test_guard_calls_the_classifier_and_the_grounding_judge(self):
         self.post("/guard", {"messages": chat("q"), "candidate_answer": "a"})
         self.assertEqual(len(self.fake.json_calls()), 1)
+        self.assertEqual(len(self.fake.calls_of("ground")), 1)
         self.assertEqual(self.fake.gen_calls(), [])
 
 

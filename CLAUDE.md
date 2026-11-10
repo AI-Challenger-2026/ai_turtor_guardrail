@@ -37,21 +37,24 @@
 
 - `server.py`: 기동용(`python3 -m uvicorn server:app`), `app.main.app`을 가져오기만 한다.
 - `app/main.py`: 라우트, 토큰 검사, 422 처리기, 요청 전체 마감(25초), `SafetyNet` 미들웨어(예외를 200 대체 응답으로 바꾸고 다시 던지지 않음, 요청당 메타데이터 로그 한 줄).
-  lifespan에서 지식 베이스 임베딩을 만든 뒤 요청을 받는다. /tutor는 판정과 검색을 동시에 돌리고, 템플릿 경로면 검색을 취소한다.
+  lifespan에서 지식 베이스 임베딩을 만든 뒤 요청을 받는다. /tutor와 /guard 모두 판정과 검색을 동시에 돌리고, 필요 없으면 검색을 취소한다.
+  /guard: block이면 후보 답변은 `{grounded: true, [], safe: false}`. allow + 후보 답변이면 근거 판정. 후보 답변 없이 normal이면 자료 확인 → 없으면 out_of_material(decision은 그대로 allow).
 - `app/schemas.py`: 요청·응답 Pydantic 모델(Literal). `spec_version`, `session_id`는 쓰지 않으므로 선언하지 않는다.
 - `app/llm.py`: 공용 AsyncOpenAI 클라이언트(채팅은 `OPENAI_*`, 임베딩은 `EMBEDDING_*`만). `chat_text`(1회), `chat_json`(json_object + Pydantic 검증 + 재시도), `embed`. 호출마다 메타데이터 로그.
   운영진 프록시는 스트리밍이 아닌 호출의 `max_completion_tokens`가 2000을 넘으면 HTTP 400으로 거절한다(생성·판정 모두 2000 이하).
 - `app/logs.py`: 허용 필드만 남기는 로그. openai/httpx 로거는 WARNING으로 고정(`OPENAI_LOG=debug`가 본문을 찍는 것 방지).
 - `app/deadline.py`, `app/config.py`, `app/templates.py`(고정 문구).
 - `app/classify.py`: low_signal 규칙 → LLM 판정(JSON, `{"category", "harm_kind"}`, 시도당 10초, 재시도 1회, 실패 시 normal). out_of_material은 normal로 바꾸고, 자료 유무는 생성기가 정한다. 판정 결과는 로그에 남기지 않는다.
-- `app/prompts.py`: 판정 프롬프트, 튜터 생성 프롬프트(answer·scaffold 규칙, found 판단, 인용 규칙), 대화 렌더링(긴 발화는 앞과 끝을 남기고 자름). `app/fewshot.py` + `app/fewshot_ids.json`: few-shot은 공개 세트 id만 두고 시작 때 `public/`에서 읽음. 평가용 id가 섞이면 서버가 뜨지 않는다.
+- `app/prompts.py`: 판정 프롬프트, 튜터 생성 프롬프트(answer·scaffold 규칙, 인용 규칙), `FOUND_RULES`(자료 유무 판단, 튜터 생성과 가드 자료 확인이 같은 문구를 씀), 근거 판정 프롬프트, 영어 질문 번역 프롬프트, 대화 렌더링(긴 발화는 앞과 끝을 남기고 자름). `app/fewshot.py` + `app/fewshot_ids.json`: few-shot은 공개 세트 id만 두고 시작 때 `public/`에서 읽음. 평가용 id가 섞이면 서버가 뜨지 않는다.
 - `app/policy.py`: 범주 → decision, (범주, harm_kind) → action·템플릿. `app/templates.py`: 고정 문구(사용자 발화를 끼워 넣지 않음).
 - `app/retrieval.py`: 섹션 = md + 같은 이름의 표 CSV(채점기 `load_kb_dir`와 같은 결합). 글자 2-gram BM25(모듈을 불러올 때 색인), 소제목(`## `) 조각 244개 임베딩(시작 때).
-  질의 = 대화 전체(튜터의 이전 답변이 학습자가 보는 페이지를 알려 줌). 후보 5개 = BM25 상위 4 + BM25에 없는 임베딩 1위. 질의 임베딩이 3초를 넘거나 실패하면 BM25만. 요청 중에는 상태를 쓰지 않는다.
+  질의 = 대화 전체(튜터의 이전 답변이 학습자가 보는 페이지를 알려 줌) + `extra`(가드의 후보 답변). 후보 5개 = BM25 상위 4 + BM25에 없는 임베딩 1위. 질의 임베딩이 3초를 넘거나 실패하면 BM25만. 요청 중에는 상태를 쓰지 않는다.
+  마지막 발화가 영어 위주(라틴 문자 12자 이상, 한글의 2배 초과)면 minimal 번역 1회(4초)를 임베딩과 동시에 돌려 BM25 질의에 덧붙인다. 번역 프롬프트의 용어집은 시작 때 지식 베이스(섹션 제목, 과정 고유 이름)에서 만든다.
 - `app/generate.py`: `generate_tutor(messages, verdict, hits, mode=, deadline=)`. JSON 1회 호출 `{"found", "citations", "answer"}`(재시도 1회, effort low).
   found=false면 action abstain(자료에 없다고 말하고 가까운 자료 내용을 덧붙여 인용). answer_seeking은 scaffold 모드(자료의 규칙·값은 말하고 최종 답은 말하지 않음), 실패하면 SCAFFOLD_ANSWER_SEEKING 문구.
   인용 = 모델이 고른 섹션(보여 준 것만) + 검색 1위, 최대 2개. pii면 이름·학교를 되풀이하지 말라는 지시 + 끝에 PII_NOTICE.
-- `app/grounding.py`: `judge_grounding(messages, candidate, hits)`(작업 3, 아직 자리만).
+- `app/grounding.py`: `judge_grounding(messages, candidate, hits, deadline=)` → (grounded, 근거 없는 구간). 구간은 후보 답변의 부분 문자열만 남긴다(따옴표·끝 구두점 정리, 겹침 제거, 최대 4개).
+  근거 없음인데 쓸 구간이 없으면 후보 답변 전체를 구간으로 낸다. 판정 실패 시 `(True, [])` + degraded=ground. `judge_found(messages, hits, deadline=)` → 자료 유무(실패 시 normal 유지 + degraded=found).
 - 판정기 reasoning_effort는 환경변수 `CLASSIFY_EFFORT`(기본 low, 단계 4에서 결정).
 
 ## 4. 테스트와 평가
@@ -81,6 +84,7 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --data public/tut
 python3 eval/retrieval_report.py --split fewshot
 ```
 
+- `tests/test_task2.py`(검색·생성), `tests/test_task3.py`(가드 근거 판정·자료 확인·영어 번역 검색).
 - `tests/test_compliance.py`: 대회 규칙 정적 점검(본문 print·로그, 다른 네트워크 클라이언트·호스트, 캐시, 파일 쓰기, `app/`의 데이터 파일, 평가용 문장·참고 답안이 코드에 들어갔는지). 규칙을 증명하지는 않고 어긋나면 알린다.
 - 실서버 로그 감사: 모든 줄이 `event=` 메타데이터(허용 필드만) 또는 uvicorn 시작·접근 줄이어야 한다.
 
@@ -118,6 +122,11 @@ python3 eval/retrieval_report.py --split fewshot
   튜터 지연 p50 6.6초, p95 11.8초, 최대 15.6초, FALLBACK 0. 생성 70건 오류 0, 질의 임베딩 96건 중 1건 3초 초과(BM25로 처리).
   검색(예시용 분할 59건): 1위 0.881, 5위 안 0.966. 조정용 세트 3회차: 인용 F1 0.78, oom 8/10, 정상 오abstain 3/51.
   남은 약점: 영어 질문의 검색 누락, 학습자 주장 확인 질문("~는 진짜 ~임")의 오abstain, 특정 기준을 묻는 oom 일부.
+- 작업 3(가드 근거 판정, 가드 out_of_material, 자료 판단 규칙 공유, 영어 번역 검색) 평가용 분할(`chan-task3`, workers 64): 총점 85.45(튜터 82.67, 가드 88.24), 형식 오류 0, 판정 오류 0, 실행 58.9초.
+  가드 77.78 → 88.24. 튜터 86.58 → 82.67은 주로 판정기 변동(정상 4건 거절, off_topic·harmful 각 1건 놓침, 판정기 코드는 그대로).
+  지연: 튜터 p50 7.1초, p95 12.1초, 최대 16.9초. 가드 p50 4.2초, p95 8.5초, 최대 13.2초. FALLBACK·degraded 0.
+  조정용 가드(89건): out_of_material 6/6(정상을 oom으로 예측 0), 근거 없음 14/15 검출, 근거 있음 오판 1/17, 구간 F1 0.386 → 0.592(구간 필수 지시 + 전체 답변 대체).
+  조정용 튜터: out_of_material 9/10, 정상 오abstain 1, 인용 F1 0.812. 평가용 생성 범주: oom 6/10, 오abstain 2, 인용 F1 0.772.
 
 ## 6. 확정된 설계 결정
 
@@ -126,6 +135,7 @@ python3 eval/retrieval_report.py --split fewshot
   jailbreak_injection → refuse, off_topic → redirect, emotional_distress → escalate, low_signal_input → clarify,
   harmful_content → 실행 요청이면 refuse, 차별·모욕 발언이면 redirect.
 - low_signal 규칙: 마지막 사용자 발화 원문에서 공백을 뺀 문자열이 비었거나, 1~12자이면서 완성형 한글·영문·숫자가 없으면 low_signal_input.
+- 가드 out_of_material은 판정기가 아니라 지식 베이스로 정한다(후보 답변 없는 normal 입력만). 정상 문항을 oom으로 답해도 범주 정확도(정답 normal은 채점 안 함)와 block F1(둘 다 allow)에 손해가 없다.
 - abstain은 고정 문구가 아니라 생성한다: 자료에 없다고 말하고, 자료의 가장 가까운 내용을 덧붙여 그 섹션을 인용한다(사용자 결정).
 - answer_seeking 스캐폴드는 자료의 규칙·값은 알려 주고 최종 선택지·계산 결과는 말하지 않는다(정답 사실 라벨이 규칙이라서).
 - 대체 응답: tutor 요청 검증 실패(422)는 CLARIFY 문구 + `clarify`, 생성 실패·시간 초과는 FALLBACK 문구 + `answer`(answer_seeking은 SCAFFOLD_ANSWER_SEEKING + `scaffold`),

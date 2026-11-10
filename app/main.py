@@ -174,6 +174,11 @@ def _consume(task: asyncio.Future) -> None:
         task.exception()
 
 
+def _degrade(info: dict, stage: str) -> None:
+    # Stage names only (e.g. "classify", "ground"); never a verdict.
+    info["degraded"] = f"{info['degraded']},{stage}" if info.get("degraded") else stage
+
+
 async def _tutor(req: TutorRequest, deadline: Deadline, info: dict):
     # Retrieval runs alongside the classifier; its result is dropped on template routes.
     retrieving = asyncio.ensure_future(retrieval.retrieve(req.messages))
@@ -181,7 +186,7 @@ async def _tutor(req: TutorRequest, deadline: Deadline, info: dict):
     try:
         result = await classify.classify(req.messages, deadline)
         if result.source == "fallback":
-            info["degraded"] = "classify"
+            _degrade(info, "classify")
         verdict = result.verdict
         route = policy.tutor_route(verdict.category, verdict.harm_kind)
         if route.template is not None:
@@ -219,17 +224,37 @@ async def guard(req: GuardRequest, request: Request) -> JSONResponse:
 
 
 async def _guard(req: GuardRequest, deadline: Deadline, info: dict):
-    result = await classify.classify(req.messages, deadline)
-    if result.source == "fallback":
-        info["degraded"] = "classify"
-    category = result.verdict.category
-    decision = policy.decision(category)
-    output = None
-    if req.candidate_answer is not None:
-        if decision == "block":
-            # A candidate answer to a blocked input complies with it (public set: always unsafe).
-            output = GuardOutput(grounded=True, unsupported=[], safe=False)
-        else:
-            grounded, spans = await grounding.judge_grounding(req.messages, req.candidate_answer, [])
-            output = GuardOutput(grounded=grounded, unsupported=spans, safe=True)
-    return GuardResponse(input=GuardInput(decision=decision, category=category), output=output).wire(), "ok"
+    candidate = req.candidate_answer
+    # Retrieval (conversation plus candidate) runs alongside the classifier.
+    retrieving = asyncio.ensure_future(retrieval.retrieve(req.messages, extra=candidate or ""))
+    retrieving.add_done_callback(_consume)
+    try:
+        result = await classify.classify(req.messages, deadline)
+        if result.source == "fallback":
+            _degrade(info, "classify")
+        category = result.verdict.category
+        decision = policy.decision(category)
+        output = None
+        if candidate is not None:
+            if decision == "block":
+                # A candidate answer to a blocked input complies with it (public set: always unsafe,
+                # with grounded=true and no spans).
+                output = GuardOutput(grounded=True, unsupported=[], safe=False)
+            else:
+                judged = await grounding.judge_grounding(req.messages, candidate, await retrieving, deadline=deadline)
+                if judged is None:
+                    _degrade(info, "ground")
+                    judged = (True, [])
+                output = GuardOutput(grounded=judged[0], unsupported=judged[1], safe=True)
+        elif category == "normal":
+            # out_of_material is decided from the knowledge base (the classifier never returns it).
+            # Its decision is "allow" like normal, so only the category can change.
+            found = await grounding.judge_found(req.messages, await retrieving, deadline=deadline)
+            if found is None:
+                _degrade(info, "found")
+            elif not found:
+                category = "out_of_material"
+        return GuardResponse(input=GuardInput(decision=decision, category=category), output=output).wire(), "ok"
+    finally:
+        if not retrieving.done():
+            retrieving.cancel()

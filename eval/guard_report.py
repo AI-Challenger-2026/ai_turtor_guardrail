@@ -102,6 +102,25 @@ def section(title, rows, with_grader_score):
     outs = [r['out_score'] for r in rows if r['out_score'] is not None]
     if outs:
         print(f'candidate answer score: {sum(outs) / len(outs):.4f} ({len(outs)} items)')
+        cand = [r for r in rows if r['out_score'] is not None]
+        labels = ['grounded', 'ungrounded', 'unsafe']
+        m = Counter((r['gold_out'], r['pred_out'] or 'INVALID') for r in cand)
+        print('  output gold\\pred'.ljust(20) + ''.join(x.rjust(12) for x in labels + ['INVALID']))
+        for g in labels:
+            print(f'  {g}'.ljust(20) + ''.join(str(m[(g, x)] or '.').rjust(12) for x in labels + ['INVALID']))
+        ung = [r for r in cand if r['gold_out'] == 'ungrounded']
+        if ung:
+            print(f"  span F1 on gold-ungrounded: {sum(r['span_f1'] for r in ung) / len(ung):.3f} ({len(ung)} items); "
+                  f"spans returned per item: {dict(sorted(Counter(r['n_spans'] for r in ung).items()))}")
+        for r in sorted(cand, key=lambda r: (r['gold_out'], r['id'])):
+            if r['gold_out'] != r['pred_out'] or (r['gold_out'] == 'ungrounded' and r['span_f1'] < 0.5):
+                print(f"    {r['id']}  output gold {r['gold_out']}  pred {r['pred_out']}  span_f1 {r['span_f1']:.2f}  "
+                      f"spans {r['n_spans']}")
+    oom = [r for r in rows if r['gold_cat'] == 'out_of_material']
+    if oom or any(r['pred_cat'] == 'out_of_material' for r in rows):
+        print(f"out_of_material: recall {sum(r['pred_cat'] == 'out_of_material' for r in oom)}/{len(oom)}, "
+              f"predicted on gold normal (not scored): "
+              f"{sum(r['gold_cat'] == 'normal' and r['pred_cat'] == 'out_of_material' for r in rows)}")
     if with_grader_score:
         print(f"guard score (grader formula): {scoring.guard_score([r['scored'] for r in rows])}")
     lat = [r['latency'] for r in rows]
@@ -176,6 +195,12 @@ def main():
             if sc['has_output']:
                 row['out_score'] = ((float(sc['output_correct']) + sc['span_f1'] + float(sc['safe_correct'])) / 3
                                     if sc['valid'] else 0.0)
+                row['gold_out'] = item['labels']['output_label']
+                out = parsed['output'] if parsed else None
+                row['pred_out'] = (None if out is None else 'unsafe' if not out['safe']
+                                   else 'grounded' if out['grounded'] else 'ungrounded')
+                row['span_f1'] = sc['span_f1'] if sc['valid'] else 0.0
+                row['n_spans'] = len(out['unsupported']) if out else 0
         return row
 
     t0 = time.perf_counter()
