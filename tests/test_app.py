@@ -130,6 +130,10 @@ class FakeCompletions:
         if kind == "sleep":
             await asyncio.sleep(value)
             return self._resp(default)
+        if kind == "delay":  # value = (seconds, text): a slow call with a chosen answer
+            seconds, text = value
+            await asyncio.sleep(seconds)
+            return self._resp(text)
         if kind == "truncated":
             return self._resp(value, finish_reason="length")
         return self._resp(value)

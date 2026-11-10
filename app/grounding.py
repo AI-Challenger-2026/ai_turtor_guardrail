@@ -94,14 +94,32 @@ async def judge_grounding(messages: Sequence[Message], candidate: str, hits: Seq
                           deadline: Deadline) -> Optional[Tuple[bool, List[str]]]:
     """(grounded, unsupported spans copied from the candidate), or None if every judge failed.
 
-    config.GROUND_JUDGES independent calls at once. The majority of the judges that answered
-    decides, a tie goes to the first; spans are the text the first two flagging judges agree on
-    (or the one flagging judge's spans)."""
+    config.GROUND_JUDGES independent calls at once. Once more than half of all judges agree, the
+    rest are cancelled (with three judges, two that agree decide, so a slow third does not hold
+    the request). Otherwise the judges that answered decide: the majority wins and a tie goes to
+    the first. Spans are the text the first two flagging judges agree on (or the one flagging
+    judge's spans). "First" is launch order, never finishing order."""
     if not candidate.strip():
         return True, []
-    outs = await asyncio.gather(*(_judge_once(messages, candidate, hits, deadline=deadline)
-                                  for _ in range(config.GROUND_JUDGES)))
-    outs = [o for o in outs if o is not None]
+    judges = [asyncio.ensure_future(_judge_once(messages, candidate, hits, deadline=deadline))
+              for _ in range(config.GROUND_JUDGES)]
+    outs: List[Tuple[bool, List[str]]] = []
+    try:
+        pending = set(judges)
+        while pending:
+            _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            outs = [j.result() for j in judges if j.done() and j.result() is not None]
+            flags = sum(not grounded for grounded, _ in outs)
+            if 2 * max(flags, len(outs) - flags) > len(judges):
+                break
+    finally:
+        for j in judges:
+            j.cancel()
+    return _majority(outs, candidate)
+
+
+def _majority(outs: Sequence[Tuple[bool, List[str]]], candidate: str) -> Optional[Tuple[bool, List[str]]]:
+    """The verdict of the judges that answered, in launch order (see judge_grounding)."""
     if not outs:
         return None
     flagged = [spans for grounded, spans in outs if not grounded]

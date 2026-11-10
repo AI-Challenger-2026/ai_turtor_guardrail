@@ -188,6 +188,33 @@ class JuryTests(Base):
         self.judge(("sleep", 0.3), ("sleep", 0.3), ("sleep", 0.3))
         self.assertLess(time.monotonic() - start, 0.55)
 
+    def test_two_agreeing_judges_do_not_wait_for_the_third(self):
+        start = time.monotonic()
+        self.assertEqual(self.judge(self.OK, self.OK, ("sleep", 5.0)), (True, []))
+        self.assertLess(time.monotonic() - start, 1.0)
+        self.assertTrue(any("kind=ground status=cancelled" in line for line in self.cap.lines))
+
+    def test_two_agreeing_flags_do_not_wait_for_the_third(self):
+        start = time.monotonic()
+        out = self.judge(("text", ground_json(False, ["따라서 85점은 A 조건을 만족해요."])),
+                         ("text", ground_json(False, ["85점은 A 조건을 만족해요"])), ("sleep", 5.0))
+        self.assertEqual(out, (False, ["85점은 A 조건을 만족해요"]))
+        self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_a_split_waits_for_the_third(self):
+        start = time.monotonic()
+        out = self.judge(("text", ground_json(False, ["85점 이상이면 A를 받아요"])), self.OK,
+                         ("delay", (0.3, ground_json(False, ["이상이면 A를 받아요."]))))
+        self.assertEqual(out, (False, ["이상이면 A를 받아요"]))
+        self.assertGreaterEqual(time.monotonic() - start, 0.3)
+
+    def test_spans_pair_judges_by_launch_order(self):
+        # The first judge answers last. The two flags share too little, so the first flagging
+        # judge's spans are kept: that is judge 1 by launch order (judge 3 by finishing order).
+        out = self.judge(("delay", (0.2, ground_json(False, ["85점 이상이면 A를 받아요"]))), self.OK,
+                         ("text", ground_json(False, ["따라서 85점은 A 조건을 만족해요."])))
+        self.assertEqual(out, (False, ["85점 이상이면 A를 받아요"]))
+
     def test_two_judge_tie_goes_to_the_first(self):
         with mock.patch.object(grounding.config, "GROUND_JUDGES", 2):
             flag = ("text", ground_json(False, ["85점 이상이면 A를 받아요"]))

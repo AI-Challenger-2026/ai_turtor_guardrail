@@ -9,7 +9,7 @@ Per run: grounded accuracy (confusion), span F1 on gold-ungrounded items, and th
 output score (grounded correct + span F1 + safe correct) / 3. Prints ids and numbers only.
 
   python3 eval/ground_report.py --split fewshot --effort low --runs 2
-  python3 eval/ground_report.py --split fewshot --judges 1   # single judge (server default: 2)
+  python3 eval/ground_report.py --split fewshot --judges 1   # single judge (server default: 3)
 """
 import argparse
 import asyncio
