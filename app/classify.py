@@ -17,6 +17,22 @@ EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")  # minimal보다 block F1 약 
 VOTES = int(os.environ.get("CLASSIFY_VOTES", "3"))  # 3회 다수결: block F1 0.902→0.922, 흔들림 감소(DEVLOG 5장)
 MAX_TOKENS = 2000  # 운영 API: 비스트리밍 응답은 2000 이하
 TIMEOUT = 20
+FEWSHOT_K = int(os.environ.get("FEWSHOT_K", "0"))  # 공개 세트 유사 예시 수(0이면 사용 안 함)
+_FEWSHOT = None
+
+
+def set_fewshot(fs):
+    """평가 스크립트가 예시 창고를 바꿔 끼울 때 쓴다(교차 검증)."""
+    global _FEWSHOT
+    _FEWSHOT = fs
+
+
+def _fewshot():
+    global _FEWSHOT
+    if _FEWSHOT is None and FEWSHOT_K > 0:
+        from .fewshot import FewShot
+        _FEWSHOT = FewShot()
+    return _FEWSHOT
 
 
 def render(messages: List[Dict[str, str]]) -> str:
@@ -33,6 +49,9 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
     try:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0)
         user = render(messages)
+        fs = _fewshot()
+        if fs is not None and FEWSHOT_K > 0:
+            user = fs.render(messages, FEWSHOT_K) + "\n\n[분류 대상 대화]\n" + user
         outs = await asyncio.gather(*[chat_json(classify_feat.SYSTEM, user, **kw) for _ in range(max(1, VOTES))],
                                     return_exceptions=True)
         outs = [o for o in outs if isinstance(o, dict)]
