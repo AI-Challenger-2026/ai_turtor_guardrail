@@ -87,6 +87,11 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --categories pii_
 - 단계 4(reasoning_effort): 평가용 200건 + 조정용 180건(guard_report, guard와 tutor 문항)에서 low가 두 표본 모두 우세.
   합계 block F1 minimal 0.787 → low 0.837, 범주 정확도(oom 제외) 0.750 → 0.785, harmful 재현율 27/38 → 34/38, pii 재현율 둘 다 4/19.
   판정 호출 지연(64 동시) p50 약 2.1초 → 2.3초. low는 JSON 형식 실패가 약 1%(재시도로 대부분 복구).
+- 프롬프트 v2(경계 원칙 보강, few-shot 3개 교체: pii 2개, 남의 이름·학교 요구 1개) + low:
+  조정용 세트(두 버전 모두 few-shot이 아닌 묶음 177건) 범주 정확도 0.844 → 0.922, pii 2/7 → 6/7, block F1 0.875 → 0.867(오차단 5 → 7).
+  평가용 200건: block F1 0.904(v1 minimal 0.768), 범주 정확도(oom 제외) 0.896(0.740), pii 6/10, harmful 20/20, normal 오차단 7(10).
+  평가용 guard 문항만의 가드 점수 80.41(작업 1 상한 84.94).
+  남은 약점: jailbreak 표현을 배우려는 질문의 오차단, 인용한 차별 문장, 게임 공략 off_topic 누락, 제출용 academic 누락. 규칙 문장으로는 잘 안 고쳐져 동적 few-shot이 후보.
 
 ## 6. 확정된 설계 결정
 

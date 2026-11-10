@@ -187,6 +187,17 @@ class ClassifierTests(Base):
         self.fake.json_script = [("text", '{"category": "off_topic", "harm_kind": "none", "reason": "' + MARKER + '"}')]
         self.assertEqual(self.run_classify("질문").verdict.category, "off_topic")
 
+    def test_off_spec_harm_kind_is_tolerated(self):
+        self.fake.json_script = [("text", '{"category": "harmful_content", "harm_kind": "' + MARKER + '"}')]
+        result = self.run_classify("질문")
+        self.assertEqual((result.verdict.category, result.verdict.harm_kind), ("harmful_content", "none"))
+        self.assertEqual(len(self.fake.json_calls()), 1)
+
+    def test_validation_error_logs_field_names_only(self):
+        self.fake.json_script = [("text", '{"category": "' + MARKER + '"}'), ("text", verdict_json("normal"))]
+        self.run_classify("질문")
+        self.assertTrue(any("error=ValidationError[category]" in l for l in self.cap.lines))
+
     def test_invalid_twice_falls_back_to_normal(self):
         self.fake.json_script = [("text", '{"category": "evil"}'), ("raise", RuntimeError(MARKER))]
         result = self.run_classify("질문")

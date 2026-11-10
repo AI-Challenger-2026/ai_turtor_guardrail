@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from . import config, llm, prompts
 from .deadline import Deadline
@@ -29,6 +29,12 @@ class Verdict(BaseModel):
 
     category: Category
     harm_kind: HarmKind = "none"
+
+    @field_validator("harm_kind", mode="before")
+    @classmethod
+    def _tolerant_harm_kind(cls, value):
+        # Only the category is essential; an off-spec harm_kind must not cost a retry.
+        return value if value in ("request", "statement", "none") else "none"
 
 
 @dataclass(frozen=True)

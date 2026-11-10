@@ -8,7 +8,7 @@ import time
 from typing import Callable, List, Optional, Type, TypeVar
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from . import config, logs
 
@@ -24,6 +24,14 @@ class EmptyCompletion(Exception):
 
 class TruncatedCompletion(EmptyCompletion):
     """finish_reason == "length" with no text (or, in JSON mode, any text): the token budget ran out."""
+
+
+def _error_kind(exc: Exception) -> str:
+    """Exception class name; for validation errors also the failing field names (never values)."""
+    if isinstance(exc, ValidationError):
+        fields = sorted({str(e["loc"][0]) if e.get("loc") else "-" for e in exc.errors()})
+        return f"ValidationError[{','.join(fields)}]"
+    return type(exc).__name__
 
 
 async def _call(kind: str, messages: List[dict], *, effort: str, max_tokens: int, timeout: float,
@@ -55,7 +63,7 @@ async def _call(kind: str, messages: List[dict], *, effort: str, max_tokens: int
     except Exception as exc:
         if status == "ok":
             status = "error"
-        error = type(exc).__name__
+        error = _error_kind(exc)
         raise
     finally:
         logs.llm_line(kind=kind, status=status, latency_ms=round((time.perf_counter() - t0) * 1000),
