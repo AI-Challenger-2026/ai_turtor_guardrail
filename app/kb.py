@@ -69,7 +69,7 @@ def tokenize(text: str) -> List[str]:
 
 
 class BM25:
-    def __init__(self, docs: List[str], k1=1.2, b=0.75):
+    def __init__(self, docs: List[str], k1=1.2, b=0.5):  # b=0.5: 탐색(504조합) 최고, 짝 0.917→0.933 / 홀 0.881→0.898
         self.k1, self.b = k1, b
         self.tfs = [Counter(tokenize(d)) for d in docs]
         self.lens = [sum(tf.values()) for tf in self.tfs]
@@ -87,7 +87,7 @@ class BM25:
             for t, qc in q.items():
                 f = tf.get(t)
                 if f:
-                    s += self.idf[t] * f * (self.k1 + 1) / (f + norm)
+                    s += self.idf[t] * f * (self.k1 + 1) / (f + norm) * qc  # 질의 단어 빈도 반영(마지막 발화 가중이 실제로 작동하도록)
             out[i] = s
         return out
 
