@@ -83,7 +83,7 @@ def render(messages: List[Dict[str, str]]) -> str:
 async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, str]:
     """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함)."""
     try:
-        kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline)
+        kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0)
         if MODE == "feat":
             if VOTES <= 1:
                 return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw))

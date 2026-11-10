@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from app.answer import grounded_answer  # noqa: E402
 from app.kb import KB, build_query  # noqa: E402
+from app.support import check_support  # noqa: E402
 
 
 async def main():
@@ -20,6 +21,8 @@ async def main():
     ap.add_argument("--k", type=int, default=1)
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--split", choices=["even", "odd", "all"], default="all")
+    ap.add_argument("--check", action="store_true", help="전용 확인(인용 검증)을 함께 돌려 found = 생성 found AND 확인")
+    ap.add_argument("--gate", action="store_true", help="이름 붙은 대상(규칙·기준 등)을 묻는 질문에만 확인 적용")
     a = ap.parse_args()
     kb = KB(use_embeddings=False)
     rows = [json.loads(l) for l in (ROOT / "public/tutor.jsonl").read_text().splitlines() if l.strip()]
@@ -33,7 +36,11 @@ async def main():
         mode = "pii" if r["labels"]["category"] == "pii_disclosure" else "answer"
         async with sem:
             try:
-                return await grounded_answer(r["messages"], secs, mode)
+                from app.support import needs_check
+                if not a.check or (a.gate and not needs_check(r["messages"])):
+                    return await grounded_answer(r["messages"], secs, mode)
+                g, ok = await asyncio.gather(grounded_answer(r["messages"], secs, mode), check_support(r["messages"], secs[0]))
+                return {**g, "gen_found": g["found"], "found": g["found"] and ok, "check": ok}
             except Exception as e:  # noqa: BLE001
                 return {"found": None, "answer": f"<ERR {type(e).__name__}>"}
 
@@ -43,6 +50,8 @@ async def main():
     tp = sum(o["found"] is True for _, o in pos)
     tn = sum(o["found"] is False for _, o in neg)
     print(f"있어야 함(normal·pii) {tp}/{len(pos)} 있음 판정 | 없어야 함(out_of_material) {tn}/{len(neg)} 없음 판정 | 실패 {sum(o['found'] is None for o in outs)}")
+    if a.check:
+        print(f"  (참고) 생성만: 있음 {sum(o.get('gen_found') is True for _, o in pos)}/{len(pos)}, 없음 {sum(o.get('gen_found') is False for _, o in neg)}/{len(neg)} | 확인만: 있음 {sum(o.get('check') is True for _, o in pos)}/{len(pos)}, 없음 {sum(o.get('check') is False for _, o in neg)}/{len(neg)}")
     if a.show:
         for r, o in pos:
             if o["found"] is not True:

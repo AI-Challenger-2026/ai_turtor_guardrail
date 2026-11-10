@@ -6,6 +6,7 @@ import os
 from .llm import chat_json, log
 
 ANSWER_EFFORT = os.environ.get("ANSWER_EFFORT", "low")
+HEDGE_AFTER = float(os.environ.get("HEDGE_AFTER", "9"))  # 답변 생성 p95 약 8~11초 → 9초 넘으면 헤지
 
 SYSTEM = """당신은 중학생이 쓰는 온라인 학습 플랫폼의 AI 튜터입니다. 과목은 파이썬 기초, AI 프롬프트 활용, 금융 리터러시입니다.
 반드시 아래 [자료]에 적힌 내용만 근거로 답합니다. 과정에 나오는 은행·상품·가게·인물·모듈·AI 도구 이름(다람쥐은행, kkumtle, Helpy 등)은 수업용 가상 설정이라, 일반 상식이 아니라 자료에 적힌 값이 정답입니다.
@@ -49,7 +50,7 @@ async def grounded_answer(messages, sections: List[Dict[str, str]], mode: str = 
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
     system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""))
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n마지막 학습자 발화에 답하세요."
-    out = await chat_json(system, user, effort=ANSWER_EFFORT, max_tokens=2000, timeout=20, deadline=deadline)
+    out = await chat_json(system, user, effort=ANSWER_EFFORT, max_tokens=2000, timeout=20, deadline=deadline, hedge_after=HEDGE_AFTER)
     ids = {s["id"] for s in sections}
     ev = out.get("evidence")
     found = out.get("found") is True and ev in ids
