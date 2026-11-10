@@ -16,7 +16,7 @@ from .llm import chat_json, log
 
 EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")  # minimal보다 block F1 약 +4%p(DEVLOG 1장)
 VOTES = int(os.environ.get("CLASSIFY_VOTES", "3"))  # 3회 다수결: block F1 0.902→0.922, 흔들림 감소(DEVLOG 5장)
-EXTRA_VOTES = int(os.environ.get("CLASSIFY_EXTRA_VOTES", "0"))  # 적응형 투표: 첫 VOTES표가 갈리면 추가로 받는 표 수(0=끔)
+EXTRA_VOTES = int(os.environ.get("CLASSIFY_EXTRA_VOTES", "2"))  # 적응형 투표: 첫 VOTES표가 갈리면 추가로 받는 표 수(0=끔)
 MAX_TOKENS = 2000  # 운영 API: 비스트리밍 응답은 2000 이하
 TIMEOUT = 20
 

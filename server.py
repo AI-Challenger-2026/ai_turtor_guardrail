@@ -36,7 +36,7 @@ MAX_ANSWER = 4000
 # 답변 생성에 주는 섹션 수. 1 = 인용할 BM25 1위 섹션만 보고 답한다(근거 충실도는 인용 섹션과만 대조되므로
 # 답변 내용과 인용이 구조적으로 일치). A/B: 섹션 1/2/3/4개 = 86.3/84.5/86.1/82.7, 1개가 가장 안정·빠름(DEVLOG 5장).
 TOP_K = int(os.environ.get("TOP_K", "1"))
-VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
+VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "6"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 분류와 답변 생성 동시 시작
 GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드: 자료에 없는 질문이면 범주를 out_of_material로(DEVLOG 20장)
 SELF_VERIFY = os.environ.get("SELF_VERIFY", "0") == "1"  # 튜터 답변 자기검증 후 재생성(DEVLOG 17장, 실험)
