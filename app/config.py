@@ -10,8 +10,13 @@ CHAT_MODEL = os.environ["OPENAI_MODEL"]
 REQUEST_DEADLINE_S = 25.0
 # Seconds kept free at the end of the budget when sizing an LLM call timeout.
 DEADLINE_MARGIN_S = 0.5
-# Per-attempt budget for the input classifier (used from step 3 on).
+# Input classifier: per-attempt budget, one retry, then "normal".
 CLASSIFY_TIMEOUT_S = 10.0
+CLASSIFY_RETRIES = 1
+CLASSIFY_EFFORT = os.environ.get("CLASSIFY_EFFORT", "minimal")
+if CLASSIFY_EFFORT not in ("minimal", "low", "medium"):
+    raise RuntimeError("CLASSIFY_EFFORT must be minimal, low or medium")
+CLASSIFY_MAX_TOKENS = 1000
 
 GENERATE_EFFORT = "low"
 GENERATE_MAX_TOKENS = 2000

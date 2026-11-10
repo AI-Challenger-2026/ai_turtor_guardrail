@@ -33,10 +33,11 @@ def _emit(fields: dict) -> None:
 
 
 def request_line(*, endpoint: str, status, latency_ms: int, body_bytes: int,
-                 input_chars=None, n_msgs=None, outcome=None, error=None) -> None:
+                 input_chars=None, n_msgs=None, outcome=None, degraded=None, error=None) -> None:
+    # `degraded` names a stage that failed and fell back (e.g. "classify"); never a verdict.
     _emit({"event": "request", "endpoint": endpoint, "status": status, "latency_ms": latency_ms,
            "body_bytes": body_bytes, "input_chars": input_chars, "n_msgs": n_msgs,
-           "outcome": outcome, "error": error})
+           "outcome": outcome, "degraded": degraded, "error": error})
 
 
 def llm_line(*, kind: str, status: str, latency_ms: int, attempt: int, error=None) -> None:

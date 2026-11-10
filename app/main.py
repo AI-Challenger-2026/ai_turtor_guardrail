@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from . import config, generate, logs, retrieval, templates
+from . import classify, config, generate, grounding, logs, policy, retrieval, templates
 from .deadline import Deadline
 from .schemas import (GuardInput, GuardOutput, GuardRequest, GuardResponse, TutorRequest,
                       TutorResponse)
@@ -105,7 +105,7 @@ class SafetyNet:
                     endpoint=logs.endpoint_label(scope.get("path", "")), status=sent["status"],
                     latency_ms=round((time.perf_counter() - t0) * 1000), body_bytes=info["body_bytes"],
                     input_chars=info.get("input_chars"), n_msgs=info.get("n_msgs"),
-                    outcome=info.get("outcome"), error=info.get("error"))
+                    outcome=info.get("outcome"), degraded=info.get("degraded"), error=info.get("error"))
             except Exception:
                 pass
 
@@ -149,7 +149,7 @@ async def tutor(req: TutorRequest, request: Request) -> JSONResponse:
     info.update(_stats(req))
     deadline = Deadline(config.REQUEST_DEADLINE_S)
     try:
-        body, outcome = await asyncio.wait_for(_tutor(req, deadline), timeout=config.REQUEST_DEADLINE_S)
+        body, outcome = await asyncio.wait_for(_tutor(req, deadline, info), timeout=config.REQUEST_DEADLINE_S)
         info["outcome"] = outcome
     except asyncio.TimeoutError:
         body = tutor_fallback()
@@ -160,12 +160,20 @@ async def tutor(req: TutorRequest, request: Request) -> JSONResponse:
     return JSONResponse(body)
 
 
-async def _tutor(req: TutorRequest, deadline: Deadline):
+async def _tutor(req: TutorRequest, deadline: Deadline, info: dict):
+    result = await classify.classify(req.messages, deadline)
+    if result.source == "fallback":
+        info["degraded"] = "classify"
+    verdict = result.verdict
+    route = policy.tutor_route(verdict.category, verdict.harm_kind)
+    if route.template is not None:
+        # Fixed text only; learner input is never interpolated.
+        return TutorResponse(answer=route.template, action=route.action).model_dump(), "ok"
     hits = await retrieval.retrieve(req.messages)
-    gen = await generate.generate_tutor(req.messages, None, hits, deadline=deadline)
+    gen = await generate.generate_tutor(req.messages, verdict, hits, deadline=deadline)
     if gen is None:
         return tutor_fallback(), "fallback_generate"
-    return TutorResponse(answer=gen.answer, action="answer", citations=gen.citations).model_dump(), "ok"
+    return TutorResponse(answer=gen.answer, action=route.action, citations=gen.citations).model_dump(), "ok"
 
 
 @app.post(GUARD_PATH)
@@ -175,7 +183,7 @@ async def guard(req: GuardRequest, request: Request) -> JSONResponse:
     with_output = req.candidate_answer is not None
     deadline = Deadline(config.REQUEST_DEADLINE_S)
     try:
-        body, outcome = await asyncio.wait_for(_guard(req, deadline), timeout=config.REQUEST_DEADLINE_S)
+        body, outcome = await asyncio.wait_for(_guard(req, deadline, info), timeout=config.REQUEST_DEADLINE_S)
         info["outcome"] = outcome
     except asyncio.TimeoutError:
         body = guard_fallback(with_output=with_output)
@@ -186,7 +194,18 @@ async def guard(req: GuardRequest, request: Request) -> JSONResponse:
     return JSONResponse(body)
 
 
-async def _guard(req: GuardRequest, deadline: Deadline):
-    # Step 2: the starter server's constant verdict. Step 3 adds the input classifier.
-    output = GuardOutput(grounded=True, unsupported=[], safe=True) if req.candidate_answer is not None else None
-    return GuardResponse(input=GuardInput(decision="allow", category="normal"), output=output).wire(), "ok"
+async def _guard(req: GuardRequest, deadline: Deadline, info: dict):
+    result = await classify.classify(req.messages, deadline)
+    if result.source == "fallback":
+        info["degraded"] = "classify"
+    category = result.verdict.category
+    decision = policy.decision(category)
+    output = None
+    if req.candidate_answer is not None:
+        if decision == "block":
+            # A candidate answer to a blocked input complies with it (public set: always unsafe).
+            output = GuardOutput(grounded=True, unsupported=[], safe=False)
+        else:
+            grounded, spans = await grounding.judge_grounding(req.messages, req.candidate_answer, [])
+            output = GuardOutput(grounded=grounded, unsupported=spans, safe=True)
+    return GuardResponse(input=GuardInput(decision=decision, category=category), output=output).wire(), "ok"

@@ -49,16 +49,33 @@ class Capture(logging.Handler):
         self.lines.append(self.format(record))  # includes traceback text if exc_info is set
 
 
+NORMAL_JSON = '{"category": "normal", "harm_kind": "none"}'
+
+
 class FakeCompletions:
-    """Scripted stand-in for client.chat.completions."""
+    """Scripted stand-in for client.chat.completions.
+
+    JSON-mode calls (the classifier) read `json_script`, default: a normal verdict.
+    Plain calls (generation) read `script`, default: an answer text.
+    """
 
     def __init__(self):
         self.script = []
+        self.json_script = []
         self.calls = []
+
+    def gen_calls(self):
+        return [c for c in self.calls if "response_format" not in c]
+
+    def json_calls(self):
+        return [c for c in self.calls if "response_format" in c]
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        kind, value = self.script.pop(0) if self.script else ("text", f"기본 답변 {MARKER}")
+        if "response_format" in kwargs:
+            kind, value = self.json_script.pop(0) if self.json_script else ("text", NORMAL_JSON)
+        else:
+            kind, value = self.script.pop(0) if self.script else ("text", f"기본 답변 {MARKER}")
         if kind == "raise":
             raise value
         if kind == "sleep":
@@ -132,7 +149,8 @@ class TutorTests(Base):
         data = r.json()
         self.assertEqual(data, {"answer": f"답변입니다 {MARKER}", "action": "answer", "citations": []})
         self.assertIsNotNone(scoring.parse_tutor(data))
-        call = self.fake.calls[0]
+        self.assertEqual(len(self.fake.json_calls()), 1)
+        call = self.fake.gen_calls()[0]
         self.assertEqual(call["model"], "test-model")
         self.assertEqual(call["messages"], [{"role": "system", "content": generate.SYSTEM}, *msgs])
         self.assertEqual(call["extra_body"], {"reasoning_effort": "low"})
@@ -144,7 +162,7 @@ class TutorTests(Base):
         msgs = [{"role": "user", "content": f"질문 {MARKER}", "name": "x"}]
         r = self.post("/tutor", {"spec_version": 1.0, "session_id": 123, "extra": [1], "messages": msgs})
         self.assertEqual(r.json()["action"], "answer")
-        self.assertEqual(self.fake.calls[0]["messages"][1], {"role": "user", "content": f"질문 {MARKER}"})
+        self.assertEqual(self.fake.gen_calls()[0]["messages"][1], {"role": "user", "content": f"질문 {MARKER}"})
 
     def test_invalid_requests_fall_back_to_clarify(self):
         bodies = [
@@ -245,9 +263,10 @@ class GuardTests(Base):
         self.assertEqual(r.status_code, 200)
         self.assertIsNotNone(scoring.parse_guard(r.json(), True))
 
-    def test_guard_makes_no_llm_call_in_step2(self):
+    def test_guard_calls_only_the_classifier(self):
         self.post("/guard", {"messages": chat("q"), "candidate_answer": "a"})
-        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(len(self.fake.json_calls()), 1)
+        self.assertEqual(self.fake.gen_calls(), [])
 
 
 class RoutingTests(Base):
@@ -317,19 +336,19 @@ class ChatJsonTests(Base):
                                          effort="minimal", max_tokens=50, timeout=timeout))
 
     def test_valid(self):
-        self.fake.script = [("text", '{"ok": true}')]
+        self.fake.json_script = [("text", '{"ok": true}')]
         self.assertEqual(self.run_json(), Verdict(ok=True))
         self.assertEqual(self.fake.calls[0]["response_format"], {"type": "json_object"})
         self.assertEqual(self.fake.calls[0]["extra_body"], {"reasoning_effort": "minimal"})
 
     def test_retry_once_then_succeed(self):
-        self.fake.script = [("text", f'{{"ok": "maybe {MARKER}"}}'), ("text", '{"ok": false}')]
+        self.fake.json_script = [("text", f'{{"ok": "maybe {MARKER}"}}'), ("text", '{"ok": false}')]
         self.assertEqual(self.run_json(), Verdict(ok=False))
         self.assertEqual(len(self.fake.calls), 2)
         self.assertTrue(any("status=invalid" in l and "attempt=1" in l for l in self.cap.lines))
 
     def test_gives_up_after_one_retry(self):
-        self.fake.script = [("raise", RuntimeError(MARKER)), ("text", "not json"), ("text", '{"ok": true}')]
+        self.fake.json_script = [("raise", RuntimeError(MARKER)), ("text", "not json"), ("text", '{"ok": true}')]
         self.assertIsNone(self.run_json())
         self.assertEqual(len(self.fake.calls), 2)
 
