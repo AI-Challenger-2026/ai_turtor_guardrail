@@ -1,0 +1,14 @@
+# secrets
+.env
+*.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# local outputs
+*.log
+logs/
+.cache/
