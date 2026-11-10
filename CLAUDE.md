@@ -55,6 +55,7 @@ python3 eval/guard_report.py --url http://localhost:8001/guard --data eval/publi
 
 - 공식: 총점 29.18(튜터 28.5, 가드 29.85), 채점 44.4초.
 - 로컬(공개 세트 전체): 32.59.
+- 로컬(평가용 분할 `eval/public_dev`, 시작용 서버, workers 64): 총점 30.55(튜터 33.5, 가드 27.61), 형식 오류 0, 판정 오류 0, 실행 70.3초.
 
 ## 5. 확정된 설계 결정
 
