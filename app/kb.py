@@ -1,22 +1,18 @@
-"""지식 베이스 로딩과 하이브리드 검색(BM25 + 임베딩).
+"""지식 베이스 로딩과 BM25 검색.
 
 - 섹션 = md 파일 하나(+ 같은 이름의 CSV 표를 본문 자리에 끼워 넣음). 인용 단위.
 - 청크 = 섹션을 '## ' 소제목 단위로 나눈 조각(앞에 섹션 제목을 붙임). 검색 단위.
 - 섹션 점수 = 그 섹션 청크들의 최고 점수.
-색인과 임베딩은 서버 시작 때 만든다(첫 요청에서 만들면 시간 초과).
+색인은 서버 시작 때 만든다(첫 요청에서 만들면 시간 초과). 외부 호출 없음.
+임베딩(text-embedding-3-small)은 검색 실험에서 BM25보다 낮아 쓰지 않는다(DEVLOG 2장, 커밋 bb4c9cb에 코드 있음).
 """
-import json
 import math
-import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import numpy as np
+from typing import Dict, List, Tuple
 
 KB_DIR = Path(__file__).resolve().parents[1] / "kb"
-CACHE = Path(__file__).resolve().parents[1] / ".cache" / "kb_emb.json"
 
 
 def _inline_tables(md_path: Path, text: str) -> str:
@@ -78,9 +74,9 @@ class BM25:
         n = len(docs)
         self.idf = {t: math.log(1 + (n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
 
-    def scores(self, query: str) -> np.ndarray:
+    def scores(self, query: str) -> List[float]:
         q = Counter(tokenize(query))
-        out = np.zeros(len(self.tfs))
+        out = []
         for i, tf in enumerate(self.tfs):
             s = 0.0
             norm = self.k1 * (1 - self.b + self.b * self.lens[i] / self.avg)
@@ -88,84 +84,24 @@ class BM25:
                 f = tf.get(t)
                 if f:
                     s += self.idf[t] * f * (self.k1 + 1) / (f + norm) * qc  # 질의 단어 빈도 반영(마지막 발화 가중이 실제로 작동하도록)
-            out[i] = s
+            out.append(s)
         return out
 
 
-# ---------- 임베딩 ----------
-def _emb_client():
-    from openai import OpenAI, AsyncOpenAI  # noqa: F401
-    return dict(api_key=os.environ["EMBEDDING_API_KEY"], base_url=os.environ["EMBEDDING_BASE_URL"])
-
-
-EMB_MODEL = os.environ.get("EMBEDDING_MODEL", "openai/text-embedding-3-small")
-
-
-def embed_sync(texts: List[str]) -> np.ndarray:
-    from openai import OpenAI
-    c = OpenAI(**_emb_client(), timeout=60, max_retries=2)
-    out = []
-    for i in range(0, len(texts), 64):
-        r = c.embeddings.create(model=EMB_MODEL, input=texts[i:i + 64])
-        out.extend(d.embedding for d in r.data)
-    v = np.array(out, dtype=np.float32)
-    return v / np.linalg.norm(v, axis=1, keepdims=True)
-
-
-_aclient = None
-
-
-async def embed_async(text: str) -> np.ndarray:
-    global _aclient
-    from openai import AsyncOpenAI
-    if _aclient is None:
-        _aclient = AsyncOpenAI(**_emb_client(), timeout=10, max_retries=1)
-    r = await _aclient.embeddings.create(model=EMB_MODEL, input=[text])
-    v = np.array(r.data[0].embedding, dtype=np.float32)
-    return v / np.linalg.norm(v)
-
-
 class KB:
-    def __init__(self, use_embeddings: bool = True):
+    def __init__(self):
         self.secs = load_sections()
         self.chunks = make_chunks(self.secs)
         self.chunk_sids = [c["sid"] for c in self.chunks]
-        self.sids = list(self.secs)
         self.bm25 = BM25([c["text"] for c in self.chunks])
-        self.emb = self._load_or_build_emb() if use_embeddings else None
 
-    def _load_or_build_emb(self) -> np.ndarray:
-        texts = [c["text"] for c in self.chunks]
-        key = str(hash(tuple(texts)))
-        try:
-            data = json.loads(CACHE.read_text())
-            if data.get("key") == key and data.get("model") == EMB_MODEL:
-                return np.array(data["emb"], dtype=np.float32)
-        except Exception:  # noqa: BLE001
-            pass
-        emb = embed_sync(texts)
-        CACHE.parent.mkdir(parents=True, exist_ok=True)
-        CACHE.write_text(json.dumps({"key": key, "model": EMB_MODEL, "emb": emb.tolist()}))
-        return emb
-
-    def _section_scores(self, chunk_scores: np.ndarray) -> Dict[str, float]:
-        best = defaultdict(lambda: -1e9)
-        for sid, s in zip(self.chunk_sids, chunk_scores):
-            if s > best[sid]:
-                best[sid] = float(s)
-        return best
-
-    def rank(self, query: str, qvec: Optional[np.ndarray] = None, k_rrf: int = 60,
-             w_bm25: float = 1.0, w_emb: float = 1.0) -> List[Tuple[str, float]]:
-        """하이브리드 순위(RRF). qvec이 없으면 BM25만."""
-        fused = defaultdict(float)
-        lists = [(self._section_scores(self.bm25.scores(query)), w_bm25)]
-        if qvec is not None and self.emb is not None:
-            lists.append((self._section_scores(self.emb @ qvec), w_emb))
-        for scores, w in lists:
-            for r, (sid, _) in enumerate(sorted(scores.items(), key=lambda x: -x[1])):
-                fused[sid] += w / (k_rrf + r + 1)
-        return sorted(fused.items(), key=lambda x: -x[1])
+    def rank(self, query: str) -> List[Tuple[str, float]]:
+        """섹션 순위: 섹션마다 청크 BM25 점수의 최댓값, 높은 순."""
+        best: Dict[str, float] = defaultdict(lambda: -1e9)
+        for sid, sc in zip(self.chunk_sids, self.bm25.scores(query)):
+            if sc > best[sid]:
+                best[sid] = sc
+        return sorted(best.items(), key=lambda x: -x[1])
 
 
 def build_query(messages: List[Dict[str, str]], mode: str = "last+users") -> str:

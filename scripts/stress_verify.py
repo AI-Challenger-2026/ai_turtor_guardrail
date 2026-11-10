@@ -27,7 +27,7 @@ async def main():
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--split", choices=["even", "odd", "all"], default="all", help="even=튜닝용, odd=최종 확인용(튜닝에 쓰지 않음)")
     a = ap.parse_args()
-    kb = KB(use_embeddings=False)
+    kb = KB()
     rows = [json.loads(l) for l in (ROOT / "public/tutor.jsonl").read_text().splitlines() if l.strip()]
     if a.split != "all":
         rows = rows[0::2] if a.split == "even" else rows[1::2]

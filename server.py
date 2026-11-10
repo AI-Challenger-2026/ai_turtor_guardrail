@@ -26,7 +26,7 @@ from app.llm import log
 from app.policy import guard_decision, template_for, tutor_action
 from app.verify import find_unsupported
 
-KB_INDEX = KB(use_embeddings=False)  # 서버 시작 때 색인 생성(BM25). 임베딩은 검색 평가에서 손해라 쓰지 않음.
+KB_INDEX = KB()  # 서버 시작 때 BM25 색인 생성(약 1.7초)
 
 TOKEN = os.environ["TEAM_TOKEN"]
 FALLBACK = "지금은 답변을 만들 수 없어요. 잠시 후 다시 질문해 주세요."
@@ -35,7 +35,6 @@ MAX_ANSWER = 4000
 # 답변 내용과 인용이 구조적으로 일치). A/B: 섹션 1/2/3/4개 = 86.3/84.5/86.1/82.7, 1개가 가장 안정·빠름(DEVLOG 5장).
 TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
-CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
 SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 분류와 답변 생성 동시 시작
 REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "26"))  # 전체 예산(초): 30초 제한 - 네트워크 여유
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
@@ -111,7 +110,7 @@ async def tutor_logic(messages, t0) -> Dict:
     if g["found"]:
         # 인용은 BM25 1위로 정한다: 공개 세트에서 LLM 선택 정확도 70% < BM25 1위 91%
         # (같은 사실이 여러 섹션에 중복돼 있어 LLM은 제목이 그럴듯한 섹션을 고르는 경향).
-        citations = [secs[0]["id"]] if CITE_MODE == "bm25" else [g["evidence"]]
+        citations = [secs[0]["id"]]
     elif action == "answer":
         action = "abstain"  # 자료에서 확인할 수 없는 질문 → 지어내지 않고 abstain
     if c["category"] == "pii_disclosure" and "개인정보" not in answer:
