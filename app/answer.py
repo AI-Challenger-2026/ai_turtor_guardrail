@@ -33,12 +33,12 @@ def render(messages: List[Dict[str, str]]) -> str:
     return "\n".join(f"{'학습자' if m.get('role') == 'user' else '튜터'}: {m.get('content', '')}" for m in messages)
 
 
-async def grounded_answer(messages, sections: List[Dict[str, str]], mode: str = "answer") -> Dict:
+async def grounded_answer(messages, sections: List[Dict[str, str]], mode: str = "answer", deadline=None) -> Dict:
     """sections: [{"id","title","text"}] (검색 순위대로). 반환: {"evidence", "found", "answer"}"""
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
     system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""))
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n마지막 학습자 발화에 답하세요."
-    out = await chat_json(system, user, effort="low", max_tokens=2000, timeout=22)
+    out = await chat_json(system, user, effort="low", max_tokens=2000, timeout=20, deadline=deadline)
     ids = {s["id"] for s in sections}
     ev = out.get("evidence")
     found = out.get("found") is True and ev in ids

@@ -78,13 +78,14 @@ def render(messages: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-async def classify(messages: List[Dict[str, str]]) -> Dict[str, str]:
+async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, str]:
     """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함)."""
     try:
+        kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline)
         if MODE == "feat":
-            out = await chat_json(classify_feat.SYSTEM, render(messages), effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT)
+            out = await chat_json(classify_feat.SYSTEM, render(messages), **kw)
             return classify_feat.parse(out)
-        out = await chat_json(SYSTEM, render(messages), effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT)
+        out = await chat_json(SYSTEM, render(messages), **kw)
         cat = out.get("category")
         if cat not in CATEGORIES:
             cat = "normal"
