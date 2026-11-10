@@ -12,3 +12,4 @@ venv/
 *.log
 logs/
 .cache/
+.cache/
