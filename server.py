@@ -31,7 +31,10 @@ KB_INDEX = KB(use_embeddings=False)  # 서버 시작 때 색인 생성(BM25). �
 TOKEN = os.environ["TEAM_TOKEN"]
 FALLBACK = "지금은 답변을 만들 수 없어요. 잠시 후 다시 질문해 주세요."
 MAX_ANSWER = 4000
-TOP_K = int(os.environ.get("TOP_K", "4"))
+# 답변 생성에 주는 섹션 수. 1 = 인용할 BM25 1위 섹션만 보고 답한다(근거 충실도는 인용 섹션과만 대조되므로
+# 답변 내용과 인용이 구조적으로 일치). A/B: 섹션 1/2/3/4개 = 86.3/84.5/86.1/82.7, 1개가 가장 안정·빠름(DEVLOG 5장).
+TOP_K = int(os.environ.get("TOP_K", "1"))
+VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
 REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "26"))  # 전체 예산(초): 30초 제한 - 네트워크 여유
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
@@ -78,7 +81,10 @@ async def tutor_logic(messages, t0) -> Dict:
     if fixed is not None:
         answer = fixed
     else:
-        mode = "scaffold" if action == "scaffold" else ("pii" if c["category"] == "pii_disclosure" else "answer")
+        if action == "scaffold":
+            mode = "academic" if c["category"] == "academic_dishonesty" else "scaffold"
+        else:
+            mode = "pii" if c["category"] == "pii_disclosure" else "answer"
         try:
             secs = retrieve(messages)
             g = await grounded_answer(messages, secs, mode, deadline=deadline)
@@ -97,7 +103,7 @@ async def tutor_logic(messages, t0) -> Dict:
 
 def retrieve_for_candidate(messages, cand: str) -> List[Dict[str, str]]:
     q = "\n".join(m["content"] for m in messages[-4:]) + "\n" + cand + "\n" + cand  # 후보 답변 가중
-    return [KB_INDEX.secs[sid] for sid, _ in KB_INDEX.rank(q)[:TOP_K]]
+    return [KB_INDEX.secs[sid] for sid, _ in KB_INDEX.rank(q)[:VERIFY_TOP_K]]
 
 
 async def _verify(messages, cand: str, deadline) -> Optional[List[str]]:

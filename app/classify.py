@@ -5,6 +5,7 @@
 """
 from typing import Dict, List
 
+import asyncio
 import os
 
 from . import classify_feat
@@ -12,6 +13,7 @@ from .llm import chat_json, log
 
 EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")
 MODE = os.environ.get("CLASSIFY_MODE", "feat")  # "feat"(v3: 신호→규칙) | "direct"(v2: 범주 직접)
+VOTES = int(os.environ.get("CLASSIFY_VOTES", "3"))  # 3회 다수결: block F1 0.902→0.922, 흔들림 감소(DEVLOG 5장)
 MAX_TOKENS = 2000 if EFFORT != "minimal" else 600
 TIMEOUT = 20 if EFFORT != "minimal" else 12
 
@@ -83,8 +85,16 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
     try:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline)
         if MODE == "feat":
-            out = await chat_json(classify_feat.SYSTEM, render(messages), **kw)
-            return classify_feat.parse(out)
+            if VOTES <= 1:
+                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw))
+            # 다수결: 같은 입력을 VOTES번 병렬 분류해 신호별 과반으로 결정(실행마다 흔들리는 판정 안정화)
+            outs = await asyncio.gather(*[chat_json(classify_feat.SYSTEM, render(messages), **kw) for _ in range(VOTES)],
+                                        return_exceptions=True)
+            outs = [o for o in outs if isinstance(o, dict)]
+            if not outs:
+                raise RuntimeError("all votes failed")
+            flags = {k: sum(o.get(k) is True for o in outs) * 2 > len(outs) for k in classify_feat.FLAGS}
+            return {**classify_feat.decide(flags), "flags": flags}
         out = await chat_json(SYSTEM, render(messages), **kw)
         cat = out.get("category")
         if cat not in CATEGORIES:

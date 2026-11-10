@@ -27,11 +27,22 @@ def main():
     ap.add_argument("--show", default="bad", choices=["all", "bad", "none"])
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--out", help="문항별 결과를 jsonl로 저장(개발용, 공개 세트만)")
+    ap.add_argument("--judge-effort", help="판정 모델 추론 수준(기본: 채점기와 같이 지정 안 함). high = 더 엄격한 판정 근사")
     a = ap.parse_args()
     rows = [json.loads(l) for l in (ROOT / "public/tutor.jsonl").read_text().splitlines() if l.strip()]
     if a.category:
-        rows = [r for r in rows if r["labels"]["category"] == a.category]
+        cats = set(a.category.split(","))
+        rows = [r for r in rows if r["labels"]["category"] in cats]
     kb = load_kb_dir(ROOT / "kb")
+    if a.judge_effort:
+        import judge as judge_mod
+        orig = judge_mod.urllib.request.Request
+
+        def with_effort(url, data=None, **kw):  # 채점기 판정 요청 본문에 reasoning_effort만 추가
+            body = json.loads(data)
+            body["reasoning_effort"] = a.judge_effort
+            return orig(url, data=json.dumps(body).encode(), **kw)
+        judge_mod.urllib.request.Request = with_effort
     judge = make_judge(os.environ["OPENAI_BASE_URL"], os.environ["OPENAI_MODEL"], os.environ["OPENAI_API_KEY"])
     tok = os.environ["TEAM_TOKEN"]
 

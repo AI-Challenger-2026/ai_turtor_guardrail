@@ -1,7 +1,11 @@
 """근거 기반 답변 생성: 검색 상위 섹션을 주고, 근거 섹션 1개 선택 + 답변을 한 번의 호출로 받는다."""
 from typing import Dict, List
 
+import os
+
 from .llm import chat_json, log
+
+ANSWER_EFFORT = os.environ.get("ANSWER_EFFORT", "low")
 
 SYSTEM = """당신은 중학생이 쓰는 온라인 학습 플랫폼의 AI 튜터입니다. 과목은 파이썬 기초, AI 프롬프트 활용, 금융 리터러시입니다.
 반드시 아래 [자료]에 적힌 내용만 근거로 답합니다. 과정에 나오는 은행·상품·가게·인물·모듈·AI 도구 이름(다람쥐은행, kkumtle, Helpy 등)은 수업용 가상 설정이라, 일반 상식이 아니라 자료에 적힌 값이 정답입니다.
@@ -25,6 +29,12 @@ MODE_RULES = {
    - 하지만 **최종 정답은 절대 쓰지 않습니다**: 고를 선택지, 계산 결과 숫자, 출력 결과, 완성 코드(코드 블록 금지), 제출할 설명 문단·글 전체.
    - 2~4단계의 짧은 풀이 순서와, 학습자가 직접 답해 볼 확인 질문 하나로 끝냅니다. 전체 4~6문장 이내.
    - found는 풀이에 필요한 규칙이 있는 섹션이 있으면 true입니다.""",
+    "academic": """
+**이번 응답은 대필 거절 + 힌트 모드입니다(위 4번보다 우선).** 학습자가 수행평가·숙제·시험에 제출할 답안(완성 코드, 코드 동작 설명, 보고서·글)을 대신 만들어 달라고 했습니다.
+   - 첫 문장: 제출할 답안은 대신 써 줄 수 없고, 스스로 쓰도록 돕겠다고 말합니다.
+   - 제출물에 들어갈 내용(코드, 코드가 어떻게 동작하는지에 대한 설명, 출력 결과, 글의 문단)을 **쓰지 않습니다**. 개념을 하나씩 풀어 설명하는 것도 대신 써 주는 것에 해당합니다.
+   - 대신 학습자가 스스로 확인할 **질문 2~3개**(예: "range에 시작값을 안 쓰면 어디서 시작할까요?")와 자료에서 찾아볼 곳(실습·예제 이름)만 짧게 줍니다. 전체 3~4문장.
+   - found는 관련 섹션이 있으면 true입니다.""",
     "pii": "   - 학습자가 이름·학교 같은 개인정보를 밝혔습니다. 답변 끝에 '이름이나 학교 같은 개인정보는 채팅에 적지 않아도 괜찮아요.'를 짧게 덧붙입니다(개인정보를 다시 부르지 않습니다).",
 }
 
@@ -38,7 +48,7 @@ async def grounded_answer(messages, sections: List[Dict[str, str]], mode: str = 
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
     system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""))
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n마지막 학습자 발화에 답하세요."
-    out = await chat_json(system, user, effort="low", max_tokens=2000, timeout=20, deadline=deadline)
+    out = await chat_json(system, user, effort=ANSWER_EFFORT, max_tokens=2000, timeout=20, deadline=deadline)
     ids = {s["id"] for s in sections}
     ev = out.get("evidence")
     found = out.get("found") is True and ev in ids
