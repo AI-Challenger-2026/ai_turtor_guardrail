@@ -128,16 +128,67 @@ class FewShotTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 fewshot.load_shots(shots_file=unknown)
 
+    def test_hand_written_labels_block_start_up(self):
+        # Labels must come from public/; an id file entry with a label is refused.
+        with tempfile.TemporaryDirectory() as d:
+            labelled = Path(d) / "labelled.json"
+            labelled.write_text(json.dumps({"shots": [{"id": classify.SHOTS[0].id, "harm_kind": "request"}]}),
+                                encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                fewshot.load_shots(shots_file=labelled)
+
+    def test_guard_harmful_items_without_public_harm_kind_are_never_examples(self):
+        public = fewshot._read_public()
+        for shot in [*classify.SHOTS, *classify.POOL]:
+            item = public[shot.id]
+            if shot.category == "harmful_content":
+                self.assertIn(item["labels"].get("action"), ("refuse", "redirect"), shot.id)
+
+    def test_pool(self):
+        split = json.loads((ROOT / "eval/split.json").read_text(encoding="utf-8"))
+        ids = {s.id for s in classify.POOL}
+        self.assertTrue(ids <= set(split["fewshot"]))
+        self.assertFalse(ids & set(split["dev"]))
+        self.assertFalse(ids & {s.id for s in classify.SHOTS})
+        self.assertFalse({s.category for s in classify.POOL} & {"out_of_material", "low_signal_input"})
+        self.assertGreater(len(classify.POOL), 100)
+
     def test_prompt_shape(self):
-        prompt = classify.build_prompt([Message(role="user", content=f"질문 {MARKER}")])
+        msgs = [Message(role="user", content=f"그 동네 사람들은 다 빼야 하지 않아? {MARKER}")]
+        prompt = classify.build_prompt(msgs)
         self.assertEqual(prompt[0]["role"], "system")
         roles = [m["role"] for m in prompt[1:]]
-        self.assertEqual(roles, ["user", "assistant"] * len(classify.SHOTS) + ["user"])
+        n_dynamic = len(classify.similar_shots(msgs, classify.config.CLASSIFY_DYNAMIC_SHOTS))
+        self.assertEqual(n_dynamic, classify.config.CLASSIFY_DYNAMIC_SHOTS)
+        self.assertEqual(roles, ["user", "assistant"] * (len(classify.SHOTS) + n_dynamic) + ["user"])
+        # Static shots first, then the dynamic ones with the most similar last.
+        static = classify.build_shot_messages(classify.SHOTS)
+        self.assertEqual(prompt[1:1 + len(static)], static)
+        dynamic = classify.similar_shots(msgs, 6)
+        self.assertEqual(dynamic[-1].id, "pub-57e7be7b")  # near-duplicate in the pool
+        self.assertEqual(prompt[-3]["content"], prompts.render(dynamic[-1].messages, **prompts.SHOT_LIMITS))
         for m in prompt[1:-1]:
             if m["role"] == "assistant":
                 classify.Verdict.model_validate_json(m["content"])
         self.assertIn(MARKER, prompt[-1]["content"])
         self.assertIn("[마지막 학습자 발화]", prompt[-1]["content"])
+
+
+class DynamicShotTests(unittest.TestCase):
+    def test_exclude_and_k(self):
+        msgs = [Message(role="user", content="그 동네 사람들은 다 빼야 하지 않아?")]
+        top = classify.similar_shots(msgs, 6)
+        self.assertEqual(len(top), 6)
+        without = classify.similar_shots(msgs, 6, exclude=frozenset({"pub-57e7be7b"}))
+        self.assertNotIn("pub-57e7be7b", [s.id for s in without])
+        self.assertEqual(classify.similar_shots(msgs, 0), [])
+
+    def test_no_overlap_means_no_dynamic_shots(self):
+        self.assertEqual(classify.similar_shots([Message(role="user", content="zzqx")], 6), [])
+
+    def test_groups_cover_every_public_item(self):
+        groups = fewshot.group_of()
+        self.assertEqual(len(groups), 400)
 
 
 class RenderTests(unittest.TestCase):

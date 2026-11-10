@@ -18,6 +18,8 @@ CLASSIFY_EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")
 if CLASSIFY_EFFORT not in ("minimal", "low", "medium"):
     raise RuntimeError("CLASSIFY_EFFORT must be minimal, low or medium")
 CLASSIFY_MAX_TOKENS = 1000
+# Pool examples most similar to the request, added after the static few-shot (0 = static only).
+CLASSIFY_DYNAMIC_SHOTS = 6
 
 GENERATE_EFFORT = "low"
 # The organizer proxy rejects (HTTP 400) non-streaming calls with max_completion_tokens > 2000.

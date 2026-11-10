@@ -352,6 +352,10 @@ class LogTests(Base):
         for name in ("openai", "httpx", "httpcore"):
             self.assertEqual(logging.getLogger(name).level, logging.WARNING)
 
+    def test_uvicorn_access_log_is_off(self):
+        # It would log the client address and raw path of every request.
+        self.assertTrue(logging.getLogger("uvicorn.access").disabled)
+
 
 class SafetyNetUnitTests(unittest.TestCase):
     def _run(self, path, headers):

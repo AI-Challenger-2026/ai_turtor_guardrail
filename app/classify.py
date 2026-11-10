@@ -14,7 +14,8 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from . import config, llm, prompts
 from .deadline import Deadline
-from .fewshot import Shot, load_shots
+from .fewshot import Shot, load_pool, load_shots
+from .retrieval import BM25
 from .schemas import Category, Message
 
 HarmKind = Literal["request", "statement", "none"]
@@ -67,22 +68,46 @@ def build_shot_messages(shots: Sequence[Shot]) -> List[dict]:
     return out
 
 
-# Built once at start-up from static files (public set ids); never from requests.
+def similarity_text(messages: Sequence) -> str:
+    """Learner turns with the last one counted twice (the last turn is what gets classified)."""
+    turns = [m["content"] if isinstance(m, dict) else m.content for m in messages
+             if (m["role"] if isinstance(m, dict) else m.role) == "user"]
+    return "\n".join(turns + turns[-1:])
+
+
+# Built once at start-up from public/ (fewshot split only); never from requests.
 SHOTS = load_shots()
 _PREFIX = [{"role": "system", "content": prompts.CLASSIFIER_SYSTEM}, *build_shot_messages(SHOTS)]
+_STATIC_IDS = {s.id for s in SHOTS}
+POOL = [s for s in load_pool() if s.id not in _STATIC_IDS]
+_POOL_BY_ID = {s.id: s for s in POOL}
+_POOL_INDEX = BM25({s.id: similarity_text(s.messages) for s in POOL})
 
 
-def build_prompt(messages: Sequence[Message]) -> List[dict]:
+def similar_shots(messages: Sequence[Message], k: int, exclude: frozenset = frozenset()) -> List[Shot]:
+    """The k pool examples most similar to the conversation, least similar first.
+
+    `exclude` is for evaluation only (leave-group-out on fewshot-split items); routes never pass it.
+    """
+    if k <= 0:
+        return []
+    scores = _POOL_INDEX.scores(similarity_text(messages))
+    ranked = sorted((sid for sid, s in scores.items() if s > 0 and sid not in exclude), key=lambda sid: (-scores[sid], sid))
+    return [_POOL_BY_ID[sid] for sid in reversed(ranked[:k])]
+
+
+def build_prompt(messages: Sequence[Message], exclude: frozenset = frozenset()) -> List[dict]:
     convo = [m.model_dump() for m in messages]
-    return [*_PREFIX, {"role": "user", "content": prompts.render(convo, **prompts.LIVE_LIMITS)}]
+    dynamic = build_shot_messages(similar_shots(messages, config.CLASSIFY_DYNAMIC_SHOTS, exclude))
+    return [*_PREFIX, *dynamic, {"role": "user", "content": prompts.render(convo, **prompts.LIVE_LIMITS)}]
 
 
-async def classify(messages: Sequence[Message], deadline: Deadline) -> Classification:
+async def classify(messages: Sequence[Message], deadline: Deadline, *, exclude: frozenset = frozenset()) -> Classification:
     last = next(m.content for m in reversed(messages) if m.role == "user")
     if is_low_signal(last):
         return Classification(Verdict(category="low_signal_input"), "rule")
     verdict = await llm.chat_json(
-        "classify", build_prompt(messages), Verdict, effort=config.CLASSIFY_EFFORT,
+        "classify", build_prompt(messages, exclude), Verdict, effort=config.CLASSIFY_EFFORT,
         max_tokens=config.CLASSIFY_MAX_TOKENS, retries=config.CLASSIFY_RETRIES,
         timeout=lambda: deadline.cap(config.CLASSIFY_TIMEOUT_S))
     if verdict is None:

@@ -15,6 +15,7 @@
 - 로컬 채점기 전체 실행, `--workers 64` 부하 시험, 설정 비교 실험은 실행 전에 묻는다.
   반복 실험은 평가용 분할의 일부로 한다(운영진 API 과다 호출 방지).
 - 사용자가 제출해서 채점 중이라고 하면 서버, 코드, 로그를 건드리지 않는다. 서버 로그나 요청 내용을 열어 보지 않는다.
+- 대회 규칙에 어긋나거나 조금이라도 걸리는 것이 있으면 즉시 보고하고 허락을 받은 뒤 진행한다.
 - 제출은 사용자가 한다.
 
 ## 2. 대회 규칙
@@ -23,7 +24,8 @@
 - 미리 학습된 모델 파일(임베딩, 리랭커, 분류 모델) 금지. 형태소 분석기, 토크나이저, BM25 라이브러리는 허용.
 - 서버에 넣을 수 있는 데이터: `kb/`, `public/`과 그 가공물, gpt-5-nano로 만든 예시, 팀이 쓴 프롬프트와 규칙.
   Claude나 다른 LLM으로 만든 별도의 예시 묶음 파일·데이터셋 파일은 서버에 넣지 않는다. 프롬프트 안에 직접 쓴 예시는 허용.
-- 로그는 시각, 엔드포인트, 상태 코드, 지연, 입력 길이, 오류 종류만 남긴다.
+  공개 문항에 Claude가 붙인 라벨(예: harm_kind)은 절대 쓰지 않는다. 라벨은 `public/` 라벨과 그것을 코드로 바꾼 값만 쓴다(few-shot id 파일은 id만 허용, 어기면 서버가 뜨지 않음).
+- 로그는 시각, 엔드포인트, 상태 코드, 지연, 입력 길이, 오류 종류만 남긴다. uvicorn 접근 로그(클라이언트 IP·포트, 경로)는 `logs.setup()`에서 끈다.
   - 요청·답변 본문, LLM 출력, 판정 이유는 남기지 않는다. 본문 `print` 금지.
   - 예외는 클래스 이름만 남긴다(Pydantic `ValidationError` 문자열에는 입력값이 들어 있다).
   - Starlette는 `Exception` 처리기로 응답한 뒤에도 예외를 다시 던져 uvicorn이 트레이스백을 남긴다. 예외는 라우트·미들웨어 안에서 잡고 다시 던지지 않는다.
@@ -45,6 +47,9 @@
 - `app/logs.py`: 허용 필드만 남기는 로그. openai/httpx 로거는 WARNING으로 고정(`OPENAI_LOG=debug`가 본문을 찍는 것 방지).
 - `app/deadline.py`, `app/config.py`, `app/templates.py`(고정 문구).
 - `app/classify.py`: low_signal 규칙 → LLM 판정(JSON, `{"category", "harm_kind"}`, 시도당 10초, 재시도 1회, 실패 시 normal). out_of_material은 normal로 바꾸고, 자료 유무는 생성기가 정한다. 판정 결과는 로그에 남기지 않는다.
+  few-shot = 고정 20개 + 요청마다 고르는 비슷한 예시 6개(`CLASSIFY_DYNAMIC_SHOTS`, 가장 비슷한 것이 마지막). 예시 저장소는 예시용 분할 중 예시가 될 수 있는 143건(low_signal·out_of_material·공개 라벨로 harm_kind를 알 수 없는 가드 harmful 제외), 글자 2-gram BM25(마지막 발화 2배 + 이전 학습자 발화).
+  `classify(..., exclude=)`는 평가 전용(묶음 제외 평가). 라우트는 쓰지 않는다(규칙 점검 테스트).
+- `app/fewshot.py` + `app/fewshot_ids.json`: id만 담는다. harm_kind는 공개 튜터 action에서만 얻는다(refuse → request, redirect → statement).
 - `app/prompts.py`: 판정 프롬프트, 튜터 생성 프롬프트(answer·scaffold 규칙, 인용 규칙), `FOUND_RULES`(자료 유무 판단, 튜터 생성과 가드 자료 확인이 같은 문구를 씀), 근거 판정 프롬프트, 영어 질문 번역 프롬프트, 대화 렌더링(긴 발화는 앞과 끝을 남기고 자름). `app/fewshot.py` + `app/fewshot_ids.json`: few-shot은 공개 세트 id만 두고 시작 때 `public/`에서 읽음. 평가용 id가 섞이면 서버가 뜨지 않는다.
 - `app/policy.py`: 범주 → decision, (범주, harm_kind) → action·템플릿. `app/templates.py`: 고정 문구(사용자 발화를 끼워 넣지 않음).
 - `app/retrieval.py`: 섹션 = md + 같은 이름의 표 CSV(채점기 `load_kb_dir`와 같은 결합). 글자 2-gram BM25(모듈을 불러올 때 색인), 소제목(`## `) 조각 244개 임베딩(시작 때).
@@ -82,6 +87,8 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --data public/tut
   --categories normal,pii_disclosure,answer_seeking,out_of_material --workers 16
 # retrieval recall (embedding calls only; --vec-cache keeps vectors in a local eval-only file)
 python3 eval/retrieval_report.py --split fewshot
+# classifier only, in-process, leave-group-out on fewshot-split items (--dynamic 0 = static shots only)
+python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --json-out /tmp/run.json
 ```
 
 - `tests/test_task2.py`(검색·생성), `tests/test_task3.py`(가드 근거 판정·자료 확인·영어 번역 검색).
@@ -127,6 +134,11 @@ python3 eval/retrieval_report.py --split fewshot
   지연: 튜터 p50 7.1초, p95 12.1초, 최대 16.9초. 가드 p50 4.2초, p95 8.5초, 최대 13.2초. FALLBACK·degraded 0.
   조정용 가드(89건): out_of_material 6/6(정상을 oom으로 예측 0), 근거 없음 14/15 검출, 근거 있음 오판 1/17, 구간 F1 0.386 → 0.592(구간 필수 지시 + 전체 답변 대체).
   조정용 튜터: out_of_material 9/10, 정상 오abstain 1, 인용 F1 0.812. 평가용 생성 범주: oom 6/10, 오abstain 2, 인용 F1 0.772.
+
+- 판정기: Claude가 붙인 harm_kind 라벨 3건을 공개 라벨에서 harm_kind가 나오는 문항으로 교체, 비슷한 예시 6개 추가, uvicorn 접근 로그 끔.
+  조정용 180건(묶음 제외 평가): 고정만 161건 정답(block F1 0.833, 범주 0.833, 정상 차단 7) → 동적 2회 162·165건(F1 0.840·0.892, 범주 0.833·0.879, 정상 차단 6·5).
+  평가용 분할(workers 64): 총점 87.69(튜터 84.17, 가드 91.2), 형식 오류 0, 판정 오류 0, 실행 66.9초. 튜터 p95 12.9초·최대 14.4초, 가드 p95 8.8초·최대 11.6초, FALLBACK 0.
+  평가용에서 매번 틀리던 가드 5건(정상 질문 차단 4, pii 누락 1)은 그대로 틀림. 점수 상승은 다른 문항(가드 harmful·jailbreak 100)에서 왔고, 일부는 회차 변동일 수 있다.
 
 ## 6. 확정된 설계 결정
 

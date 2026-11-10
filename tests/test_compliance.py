@@ -92,6 +92,13 @@ class StateTests(unittest.TestCase):
                 fn = src[:m.start()].rsplit("\ndef ", 1)[-1].rsplit("\nasync def ", 1)[-1]
                 self.assertTrue(fn.startswith("build_embeddings("), "global outside the start-up builder")
 
+    def test_routes_never_use_the_evaluation_exclude(self):
+        # classify(..., exclude=) exists only for leave-group-out evaluation; no request path may
+        # change which examples it sees based on anything but the request text.
+        for name, src in SOURCES.items():
+            if name != "classify.py":
+                self.assertNotIn("exclude=", code_only(src), name)
+
     def test_no_file_writes(self):
         for name, src in SOURCES.items():
             code = code_only(src)
@@ -106,7 +113,7 @@ class DataTests(unittest.TestCase):
     def test_fewshot_file_holds_ids_only(self):
         data = json.loads((APP / "fewshot_ids.json").read_text(encoding="utf-8"))
         for shot in data["shots"]:
-            self.assertLessEqual(set(shot), {"id", "harm_kind"})
+            self.assertEqual(set(shot), {"id"})  # no hand-written labels
             self.assertRegex(shot["id"], r"^pub-[0-9a-f]{8}$")
 
     def test_no_dev_text_in_prompts_or_code(self):

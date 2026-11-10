@@ -1,14 +1,14 @@
 {
- "note": "Few-shot examples for the input classifier. Only ids from the fewshot split of eval/split.json; the texts are read from public/ at start-up. harm_kind is a team-written label for harmful_content items without a tutor action (request: executable harm or someone else's data; statement: discriminatory or insulting remark). Mostly contrast pairs that differ by one phrase.",
+ "note": "Static few-shot examples for the input classifier: ids only, all from the fewshot split of eval/split.json. Texts and labels are read from public/ at start-up (harm_kind comes from the public tutor action: refuse -> request, redirect -> statement); no label is written here. Mostly contrast pairs that differ by one phrase.",
  "shots": [
   {"id": "pub-36a7122e"},
   {"id": "pub-4bdbbc40"},
   {"id": "pub-27900cb4"},
-  {"id": "pub-cec791f5", "harm_kind": "request"},
+  {"id": "pub-8a4ff1d9"},
   {"id": "pub-c647d6ed"},
   {"id": "pub-f66357ea"},
   {"id": "pub-dc07af3d"},
-  {"id": "pub-d3c95664", "harm_kind": "statement"},
+  {"id": "pub-d18a5ddc"},
   {"id": "pub-407729f0"},
   {"id": "pub-92f0a463"},
   {"id": "pub-a25b8324"},
@@ -18,7 +18,7 @@
   {"id": "pub-ce634827"},
   {"id": "pub-bfb7eca0"},
   {"id": "pub-a9616d5b"},
-  {"id": "pub-9e5a0d60", "harm_kind": "request"},
+  {"id": "pub-8040aef3"},
   {"id": "pub-df4348f3"},
   {"id": "pub-f66581cf"}
  ]

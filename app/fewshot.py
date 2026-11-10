@@ -1,12 +1,16 @@
-"""Load classifier few-shot examples (public-set ids) at start-up.
+"""Load classifier few-shot examples from the public set at start-up.
 
-Start-up fails if an id is unknown, belongs to the dev split, or lacks a usable label,
-so a bad example list can never reach the classifier silently.
+- Static shots: the ids in fewshot_ids.json.
+- Dynamic pool: every fewshot-split item usable as an example (similar ones are picked per
+  request in classify.py).
+All labels come from public/ (category; harm_kind from the tutor action). The id file may hold
+ids only, so no hand-written label can reach the classifier. Start-up fails on an unknown id,
+a dev-split id, or an entry with anything but an id.
 """
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from .schemas import CATEGORIES
 
@@ -38,31 +42,64 @@ def _read_public() -> dict:
     return items
 
 
+def _dev_ids(split_file: Path) -> set:
+    return set(json.loads(split_file.read_text(encoding="utf-8"))["dev"]) if split_file.exists() else set()
+
+
+def to_shot(item: dict) -> Shot:
+    """A public item as an example, or ValueError if it cannot be one (labels from public/ only)."""
+    category = item["labels"]["category"]
+    if category not in CATEGORIES or category in EXCLUDED:
+        raise ValueError("category not usable as an example")
+    harm_kind = "none"
+    if category == "harmful_content":
+        harm_kind = _ACTION_TO_HARM_KIND.get(item["labels"].get("action"))
+        if harm_kind is None:
+            raise ValueError("no public label gives this item's harm_kind")
+    messages = tuple({"role": m["role"], "content": m["content"]} for m in item["messages"])
+    return Shot(id=item["id"], messages=messages, category=category, harm_kind=harm_kind)
+
+
 def load_shots(shots_file: Path = SHOTS_FILE, split_file: Path = SPLIT_FILE) -> List[Shot]:
     entries = json.loads(shots_file.read_text(encoding="utf-8"))["shots"]
+    if any(set(e) != {"id"} for e in entries):
+        raise RuntimeError("few-shot entries must hold ids only; labels come from public/")
     ids = [e["id"] for e in entries]
     if len(set(ids)) != len(ids):
         raise RuntimeError("duplicate few-shot ids")
-    if split_file.exists():
-        dev = set(json.loads(split_file.read_text(encoding="utf-8"))["dev"])
-        leaked = [i for i in ids if i in dev]
-        if leaked:
-            raise RuntimeError(f"{len(leaked)} few-shot ids belong to the dev split")
+    leaked = [i for i in ids if i in _dev_ids(split_file)]
+    if leaked:
+        raise RuntimeError(f"{len(leaked)} few-shot ids belong to the dev split")
     public = _read_public()
     shots = []
-    for entry in entries:
-        item = public.get(entry["id"])
+    for item_id in ids:
+        item = public.get(item_id)
         if item is None:
             raise RuntimeError("unknown few-shot id")
-        category = item["labels"]["category"]
-        if category not in CATEGORIES or category in EXCLUDED:
-            raise RuntimeError("few-shot category not allowed")
-        if category == "harmful_content":
-            harm_kind = entry.get("harm_kind") or _ACTION_TO_HARM_KIND.get(item["labels"].get("action"))
-            if harm_kind not in ("request", "statement"):
-                raise RuntimeError("harmful few-shot without harm_kind")
-        else:
-            harm_kind = "none"
-        messages = tuple({"role": m["role"], "content": m["content"]} for m in item["messages"])
-        shots.append(Shot(id=item["id"], messages=messages, category=category, harm_kind=harm_kind))
+        try:
+            shots.append(to_shot(item))
+        except ValueError as exc:
+            raise RuntimeError(f"few-shot id not usable: {exc}") from None
     return shots
+
+
+def load_pool(split_file: Path = SPLIT_FILE) -> List[Shot]:
+    """Every fewshot-split item that can be an example (dev items never; see to_shot)."""
+    split = json.loads(split_file.read_text(encoding="utf-8"))
+    dev = set(split["dev"])
+    public = _read_public()
+    pool = []
+    for item_id in split["fewshot"]:
+        if item_id in dev or item_id not in public:
+            raise RuntimeError("bad fewshot-split id")
+        try:
+            pool.append(to_shot(public[item_id]))
+        except ValueError:
+            continue  # low_signal, out_of_material, or harmful without a public harm_kind
+    return pool
+
+
+def group_of(split_file: Path = SPLIT_FILE) -> Dict[str, int]:
+    """Item id -> contrast group number (evaluation uses it for leave-group-out)."""
+    split = json.loads(split_file.read_text(encoding="utf-8"))
+    return {i: g["group"] for g in split["groups"] for i in g["ids"]}

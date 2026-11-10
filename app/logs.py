@@ -21,6 +21,12 @@ def setup() -> None:
     # Third-party loggers can dump request bodies at debug level (e.g. OPENAI_LOG=debug).
     for name in ("openai", "httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
+    # uvicorn's access log writes the client address and the raw request path for every request,
+    # which our allowlist does not include; request_line already records endpoint, status and
+    # latency. uvicorn configures logging before it imports the app, so this stays in effect.
+    access = logging.getLogger("uvicorn.access")
+    access.disabled = True
+    access.setLevel(logging.WARNING)
 
 
 def endpoint_label(path: str) -> str:
