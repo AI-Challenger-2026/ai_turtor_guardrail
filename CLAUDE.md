@@ -33,9 +33,23 @@
 - 값은 Pydantic `Literal`로 검증. `citations`는 항상 문자열 리스트, `answer`는 4,000자 이하.
 - 요청당 30초, 동시 64개. 전체 채점 2분 이내 목표. 색인과 임베딩은 서버 시작 때 만든다.
 
-## 3. 평가
+## 3. 코드 구조
+
+- `server.py`: 기동용(`python3 -m uvicorn server:app`), `app.main.app`을 가져오기만 한다.
+- `app/main.py`: 라우트, 토큰 검사, 422 처리기, 요청 전체 마감(25초), `SafetyNet` 미들웨어(예외를 200 대체 응답으로 바꾸고 다시 던지지 않음, 요청당 메타데이터 로그 한 줄).
+- `app/schemas.py`: 요청·응답 Pydantic 모델(Literal). `spec_version`, `session_id`는 쓰지 않으므로 선언하지 않는다.
+- `app/llm.py`: 공용 AsyncOpenAI 클라이언트. `chat_text`(1회), `chat_json`(json_object + Pydantic 검증 + 재시도). 호출마다 메타데이터 로그.
+- `app/logs.py`: 허용 필드만 남기는 로그. openai/httpx 로거는 WARNING으로 고정(`OPENAI_LOG=debug`가 본문을 찍는 것 방지).
+- `app/deadline.py`, `app/config.py`, `app/templates.py`(고정 문구).
+- `app/generate.py`: `generate_tutor(messages, verdict, hits, deadline=)`. `app/retrieval.py`: `retrieve(messages, k)`(작업 2). `app/grounding.py`: `judge_grounding(messages, candidate, hits)`(작업 3).
+
+## 4. 테스트와 평가
 
 ```bash
+# offline tests (fake LLM, no network)
+python3 -m unittest discover -s tests -v
+# live smoke test against the 8001 test server (1 real LLM call); marker must not appear in the server log
+python3 tests/smoke_live.py --base http://localhost:8001
 set -a; . ./.env; set +a
 # test server
 python3 -m uvicorn server:app --host 127.0.0.1 --port 8001
@@ -51,13 +65,16 @@ python3 eval/guard_report.py --url http://localhost:8001/guard --data eval/publi
   - (엔드포인트, 묶음 범주 조합)으로 층화, 고정 seed.
 - 평가용(`dev`) 문항은 프롬프트나 few-shot에 넣지 않는다. few-shot은 `fewshot` 분할의 공개 세트 id 목록만 두고 서버 시작 때 `public/`에서 불러온다.
 
-## 4. 기준선
+## 5. 기준선
 
 - 공식: 총점 29.18(튜터 28.5, 가드 29.85), 채점 44.4초.
 - 로컬(공개 세트 전체): 32.59.
 - 로컬(평가용 분할 `eval/public_dev`, 시작용 서버, workers 64): 총점 30.55(튜터 33.5, 가드 27.61), 형식 오류 0, 판정 오류 0, 실행 70.3초.
 
-## 5. 확정된 설계 결정
+- 단계 2(골격 정비) 뒤 평가용 분할: 총점 31.0(튜터 34.38, 가드 27.61), 형식 오류 0, 판정 오류 0, 실행 56.5초.
+  튜터 지연 p50 6.5초, p95 11.5초, 최대 14.5초. 생성 100건 중 1건 빈 응답 → FALLBACK.
+
+## 6. 확정된 설계 결정
 
 - 가드 decision은 범주 표로 정한다. block = `academic_dishonesty`, `harmful_content`, `jailbreak_injection`, `off_topic`.
 - 튜터 action: normal·pii_disclosure → answer, out_of_material → abstain, answer_seeking·academic_dishonesty → scaffold,
