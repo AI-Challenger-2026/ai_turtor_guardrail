@@ -16,6 +16,10 @@ T = TypeVar("T", bound=BaseModel)
 
 # Reads OPENAI_API_KEY and OPENAI_BASE_URL from the environment.
 _client = AsyncOpenAI(timeout=config.REQUEST_DEADLINE_S, max_retries=0)
+# Embeddings use only the EMBEDDING_* settings; no client at all if they are missing.
+_embed_client = (AsyncOpenAI(api_key=config.EMBED_API_KEY, base_url=config.EMBED_BASE_URL,
+                             timeout=config.EMBED_STARTUP_TIMEOUT_S, max_retries=0)
+                 if config.EMBED_ENABLED else None)
 
 
 class EmptyCompletion(Exception):
@@ -78,6 +82,33 @@ async def chat_text(kind: str, messages: List[dict], *, effort: str, max_tokens:
                            attempt=1, json_mode=False, parse=lambda s: s)
     except Exception:
         return None
+
+
+async def embed(kind: str, texts: List[str], *, timeout: float, attempt: int = 1) -> Optional[List[List[float]]]:
+    """Embed `texts` (one request). Returns one vector per text, or None on any failure."""
+    if _embed_client is None or not texts:
+        return None
+    t0 = time.perf_counter()
+    status, error = "ok", None
+    try:
+        if timeout <= 0:
+            raise asyncio.TimeoutError
+        resp = await asyncio.wait_for(
+            _embed_client.embeddings.create(model=config.EMBED_MODEL, input=texts, timeout=timeout),
+            timeout=timeout)
+        data = sorted(resp.data, key=lambda d: d.index)
+        if len(data) != len(texts) or any(not d.embedding for d in data):
+            raise EmptyCompletion
+        return [list(d.embedding) for d in data]
+    except asyncio.CancelledError:
+        status = "cancelled"
+        raise
+    except Exception as exc:
+        status, error = "error", _error_kind(exc)
+        return None
+    finally:
+        logs.llm_line(kind=kind, status=status, latency_ms=round((time.perf_counter() - t0) * 1000),
+                      attempt=attempt, error=error)
 
 
 async def chat_json(kind: str, messages: List[dict], schema: Type[T], *, effort: str, max_tokens: int,

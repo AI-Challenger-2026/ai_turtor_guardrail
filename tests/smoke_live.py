@@ -19,6 +19,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "grader"))
 import scoring  # noqa: E402
+# The server's generation-failure text (app/templates.py FALLBACK); kept literal so this
+# script does not import the app (which needs the server environment).
+FALLBACK_TEXT = "지금은 답변을 만들 수 없어요. 잠시 후 다시 질문해 주세요."
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -88,6 +91,13 @@ def main():
     ok = s == 200 and scoring.parse_tutor(p) is not None
     check("tutor: real answer is spec-valid", ok, f"status={s} latency={t:.2f}s action={p and p.get('action')} "
           f"answer_chars={p and len(p.get('answer', ''))}")
+    # A spec-valid fallback would pass the check above; a real grounded answer must cite a section.
+    q = [{"role": "user", "content": f"다람쥐 꿈모으기 정기예금은 최소 얼마부터 가입할 수 있어? {marker}"}]
+    s, p, _, t = call(tutor, {"messages": q}, a.token)
+    ok = (s == 200 and scoring.parse_tutor(p) is not None and p["answer"] != FALLBACK_TEXT
+          and p["action"] == "answer" and p["citations"] == ["FIN-02-04"])
+    check("tutor: generated answer cites the right section (not a fallback)", ok,
+          f"status={s} latency={t:.2f}s action={p and p.get('action')} citations={p and p.get('citations')}")
 
     print(f"\nmarker: {marker}")
     print(f"{sum(checks)}/{len(checks)} passed")

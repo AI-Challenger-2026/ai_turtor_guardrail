@@ -20,6 +20,22 @@ if CLASSIFY_EFFORT not in ("minimal", "low", "medium"):
 CLASSIFY_MAX_TOKENS = 1000
 
 GENERATE_EFFORT = "low"
+# The organizer proxy rejects (HTTP 400) non-streaming calls with max_completion_tokens > 2000.
 GENERATE_MAX_TOKENS = 2000
+# One retry if the JSON is invalid; each attempt is capped by the remaining request budget.
+GENERATE_RETRIES = 1
+
+# Embeddings: EMBEDDING_* environment only. If any setting is missing, retrieval is BM25 only.
+EMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "")
+EMBED_BASE_URL = os.environ.get("EMBEDDING_BASE_URL", "")
+EMBED_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
+EMBED_ENABLED = bool(EMBED_MODEL and EMBED_BASE_URL and EMBED_API_KEY)
+# Per-request query embedding budget; on timeout or error the request uses BM25 only.
+EMBED_QUERY_TIMEOUT_S = 3.0
+# Start-up knowledge-base embedding: per-attempt budget and retries before going BM25 only.
+EMBED_STARTUP_TIMEOUT_S = 60.0
+EMBED_STARTUP_RETRIES = 2
+# Sections handed to the generator.
+RETRIEVE_K = 5
 
 ANSWER_MAX_CHARS = 4000

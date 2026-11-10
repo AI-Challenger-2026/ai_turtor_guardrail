@@ -18,6 +18,9 @@ from unittest import mock
 # accidental real call fails fast instead of reaching the API.
 os.environ.update(TEAM_TOKEN="test-token", OPENAI_MODEL="test-model", OPENAI_API_KEY="test-key",
                   OPENAI_BASE_URL="http://127.0.0.1:9/v1")
+# No embedding settings: retrieval runs on BM25 alone unless a test installs a fake client.
+for _name in ("EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY"):
+    os.environ.pop(_name, None)
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "grader"))
@@ -27,7 +30,7 @@ import scoring  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from app import config, generate, llm, main, templates  # noqa: E402
+from app import config, generate, llm, main, prompts, templates  # noqa: E402
 from app.main import SafetyNet, app  # noqa: E402
 
 MARKER = "MARKER-7f3a9c"
@@ -52,11 +55,22 @@ class Capture(logging.Handler):
 NORMAL_JSON = '{"category": "normal", "harm_kind": "none"}'
 
 
+def gen_json(answer, found=True, citations=()):
+    return json.dumps({"found": found, "citations": list(citations), "answer": answer}, ensure_ascii=False)
+
+
+DEFAULT_GEN = gen_json(f"기본 답변 {MARKER}")
+
+
+def is_classify(call) -> bool:
+    return call["messages"][0]["content"] == prompts.CLASSIFIER_SYSTEM
+
+
 class FakeCompletions:
     """Scripted stand-in for client.chat.completions.
 
-    JSON-mode calls (the classifier) read `json_script`, default: a normal verdict.
-    Plain calls (generation) read `script`, default: an answer text.
+    Classifier calls (system prompt == CLASSIFIER_SYSTEM) read `json_script`, default: a normal
+    verdict. Every other call (generation) reads `script`, default: a found=true answer JSON.
     """
 
     def __init__(self):
@@ -65,22 +79,24 @@ class FakeCompletions:
         self.calls = []
 
     def gen_calls(self):
-        return [c for c in self.calls if "response_format" not in c]
+        return [c for c in self.calls if not is_classify(c)]
 
     def json_calls(self):
-        return [c for c in self.calls if "response_format" in c]
+        return [c for c in self.calls if is_classify(c)]
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        if "response_format" in kwargs:
-            kind, value = self.json_script.pop(0) if self.json_script else ("text", NORMAL_JSON)
+        if is_classify(kwargs):
+            default = NORMAL_JSON
+            kind, value = self.json_script.pop(0) if self.json_script else ("text", default)
         else:
-            kind, value = self.script.pop(0) if self.script else ("text", f"기본 답변 {MARKER}")
+            default = DEFAULT_GEN
+            kind, value = self.script.pop(0) if self.script else ("text", default)
         if kind == "raise":
             raise value
         if kind == "sleep":
             await asyncio.sleep(value)
-            return self._resp(f"늦은 답변 {MARKER}")
+            return self._resp(default)
         if kind == "truncated":
             return self._resp(value, finish_reason="length")
         return self._resp(value)
@@ -142,27 +158,29 @@ class AuthTests(Base):
 
 class TutorTests(Base):
     def test_answer_path(self):
-        self.fake.script = [("text", f"  답변입니다 {MARKER}  ")]
-        msgs = chat("학습자료의 내용을 요약해 주세요.", "네.", f"질문 {MARKER}")
+        self.fake.script = [("text", gen_json(f"  답변입니다 {MARKER}  ", citations=["FIN-02-04"]))]
+        msgs = chat("학습자료의 내용을 요약해 주세요.", "네.", f"다람쥐 꿈모으기 정기예금 최소 가입 금액 {MARKER}")
         r = self.post("/tutor", {"spec_version": "1.0", "session_id": "s_1", "messages": msgs})
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(data, {"answer": f"답변입니다 {MARKER}", "action": "answer", "citations": []})
+        self.assertEqual(data, {"answer": f"답변입니다 {MARKER}", "action": "answer", "citations": ["FIN-02-04"]})
         self.assertIsNotNone(scoring.parse_tutor(data))
         self.assertEqual(len(self.fake.json_calls()), 1)
         call = self.fake.gen_calls()[0]
         self.assertEqual(call["model"], "test-model")
-        self.assertEqual(call["messages"], [{"role": "system", "content": generate.SYSTEM}, *msgs])
+        self.assertEqual([m["role"] for m in call["messages"]], ["system", "user"])
+        self.assertIn("=== 섹션 FIN-02-04 ===", call["messages"][1]["content"])
+        self.assertIn(MARKER, call["messages"][1]["content"])
         self.assertEqual(call["extra_body"], {"reasoning_effort": "low"})
         self.assertEqual(call["max_completion_tokens"], 2000)
-        self.assertNotIn("response_format", call)
+        self.assertEqual(call["response_format"], {"type": "json_object"})
         self.assertGreater(call["timeout"], 20)
 
     def test_extra_fields_are_ignored(self):
         msgs = [{"role": "user", "content": f"질문 {MARKER}", "name": "x"}]
         r = self.post("/tutor", {"spec_version": 1.0, "session_id": 123, "extra": [1], "messages": msgs})
         self.assertEqual(r.json()["action"], "answer")
-        self.assertEqual(self.fake.gen_calls()[0]["messages"][1], {"role": "user", "content": f"질문 {MARKER}"})
+        self.assertIn(f"질문 {MARKER}", self.fake.gen_calls()[0]["messages"][1]["content"])
 
     def test_invalid_requests_fall_back_to_clarify(self):
         bodies = [
@@ -184,26 +202,26 @@ class TutorTests(Base):
         self.assertTrue(all("outcome=fallback_invalid" in line for line in self.request_lines()))
 
     def test_llm_error_falls_back(self):
-        self.fake.script = [("raise", RuntimeError(f"boom {MARKER}"))]
+        self.fake.script = [("raise", RuntimeError(f"boom {MARKER}"))] * 2
         r = self.post("/tutor", {"messages": chat(f"질문 {MARKER}")})
         self.assertEqual(r.json(), {"answer": templates.FALLBACK, "action": "answer", "citations": []})
         self.assertTrue(any("event=llm" in l and "error=RuntimeError" in l for l in self.cap.lines))
         self.assertTrue(any("outcome=fallback_generate" in l for l in self.request_lines()))
 
     def test_empty_completion_falls_back(self):
-        self.fake.script = [("text", "   ")]
+        self.fake.script = [("text", "   ")] * 2
         r = self.post("/tutor", {"messages": chat("질문")})
         self.assertEqual(r.json()["answer"], templates.FALLBACK)
         self.assertTrue(any("error=EmptyCompletion" in l for l in self.cap.lines))
 
     def test_token_limit_is_logged_as_truncated(self):
-        self.fake.script = [("truncated", "")]
+        self.fake.script = [("truncated", '{"found": true, "answer": "가'), ("truncated", "")]
         r = self.post("/tutor", {"messages": chat("질문")})
         self.assertEqual(r.json()["answer"], templates.FALLBACK)
         self.assertTrue(any("error=TruncatedCompletion" in l for l in self.cap.lines))
 
     def test_answer_is_capped_at_4000_chars(self):
-        self.fake.script = [("text", "가" * 5000)]
+        self.fake.script = [("text", gen_json("가" * 5000))]
         data = self.post("/tutor", {"messages": chat("질문")}).json()
         self.assertEqual(len(data["answer"]), 4000)
         self.assertIsNotNone(scoring.parse_tutor(data))
@@ -331,29 +349,30 @@ class Verdict(BaseModel):
 
 
 class ChatJsonTests(Base):
+    # These calls carry no classifier system prompt, so the fake serves them from `script`.
     def run_json(self, timeout=lambda: 5.0):
         return asyncio.run(llm.chat_json("classify", [{"role": "user", "content": MARKER}], Verdict,
                                          effort="minimal", max_tokens=50, timeout=timeout))
 
     def test_valid(self):
-        self.fake.json_script = [("text", '{"ok": true}')]
+        self.fake.script = [("text", '{"ok": true}')]
         self.assertEqual(self.run_json(), Verdict(ok=True))
         self.assertEqual(self.fake.calls[0]["response_format"], {"type": "json_object"})
         self.assertEqual(self.fake.calls[0]["extra_body"], {"reasoning_effort": "minimal"})
 
     def test_retry_once_then_succeed(self):
-        self.fake.json_script = [("text", f'{{"ok": "maybe {MARKER}"}}'), ("text", '{"ok": false}')]
+        self.fake.script = [("text", f'{{"ok": "maybe {MARKER}"}}'), ("text", '{"ok": false}')]
         self.assertEqual(self.run_json(), Verdict(ok=False))
         self.assertEqual(len(self.fake.calls), 2)
         self.assertTrue(any("status=invalid" in l and "attempt=1" in l for l in self.cap.lines))
 
     def test_gives_up_after_one_retry(self):
-        self.fake.json_script = [("raise", RuntimeError(MARKER)), ("text", "not json"), ("text", '{"ok": true}')]
+        self.fake.script = [("raise", RuntimeError(MARKER)), ("text", "not json"), ("text", '{"ok": true}')]
         self.assertIsNone(self.run_json())
         self.assertEqual(len(self.fake.calls), 2)
 
     def test_truncated_json_is_reported_and_retried(self):
-        self.fake.json_script = [("truncated", '{"ok": tr'), ("text", '{"ok": true}')]
+        self.fake.script = [("truncated", '{"ok": tr'), ("text", '{"ok": true}')]
         self.assertEqual(self.run_json(), Verdict(ok=True))
         self.assertTrue(any("error=TruncatedCompletion" in l and "attempt=1" in l for l in self.cap.lines))
 

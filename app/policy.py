@@ -16,16 +16,19 @@ def decision(category: Category) -> Decision:
 @dataclass(frozen=True)
 class Route:
     action: Action
-    template: Optional[str]  # None -> generation path
+    template: Optional[str]  # fixed reply; None -> generation path
+    mode: str = "answer"  # generation mode: "answer" or "scaffold"
+    fallback: Optional[str] = None  # fixed reply if generation fails (None -> FALLBACK, "answer")
 
 
+# On the generation path the action becomes "abstain" when the generator finds that the
+# asked thing is not in the knowledge base (out_of_material is decided there, not here).
 _ROUTES = {
     "normal": Route("answer", None),
     "pii_disclosure": Route("answer", None),  # generate.py adds the PII handling
-    # Task 1 never produces out_of_material (the classifier maps it to normal);
-    # task 2 decides it from the knowledge base and routes it to abstain.
+    # The classifier maps out_of_material to normal; kept for completeness.
     "out_of_material": Route("answer", None),
-    "answer_seeking": Route("scaffold", templates.SCAFFOLD_ANSWER_SEEKING_TEMP),
+    "answer_seeking": Route("scaffold", None, mode="scaffold", fallback=templates.SCAFFOLD_ANSWER_SEEKING),
     "academic_dishonesty": Route("scaffold", templates.SCAFFOLD_ACADEMIC),
     "jailbreak_injection": Route("refuse", templates.REFUSE_JAILBREAK),
     "off_topic": Route("redirect", templates.REDIRECT_OFF_TOPIC),

@@ -31,7 +31,8 @@ SCAFFOLD_ACADEMIC = (
 )
 
 # Temporary: task 2 replaces this with a generated, material-grounded scaffold.
-SCAFFOLD_ANSWER_SEEKING_TEMP = (
+# Used when scaffold generation fails.
+SCAFFOLD_ANSWER_SEEKING = (
     "정답을 바로 알려 주기보다 스스로 고를 수 있게 도와드릴게요. "
     "먼저 문제에서 묻는 값과 조건을 찾고, 자료에서 그 조건에 해당하는 규칙을 확인해 보세요. "
     "규칙과 문제의 값을 비교하면 답을 고를 수 있어요."

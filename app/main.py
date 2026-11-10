@@ -12,6 +12,7 @@ import asyncio
 import json
 import secrets
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -128,8 +129,15 @@ class SafetyNet:
             pass  # client already gone
 
 
+@asynccontextmanager
+async def lifespan(_app):
+    # Knowledge-base embeddings are built before the server accepts requests.
+    await retrieval.build_embeddings()
+    yield
+
+
 app = FastAPI(redirect_slashes=False, dependencies=[Depends(check_token)],
-              docs_url=None, redoc_url=None, openapi_url=None)
+              docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.add_middleware(SafetyNet)
 
 
@@ -160,20 +168,36 @@ async def tutor(req: TutorRequest, request: Request) -> JSONResponse:
     return JSONResponse(body)
 
 
+def _consume(task: asyncio.Future) -> None:
+    # Retrieve a finished task's exception so asyncio never logs it (its message may hold input).
+    if not task.cancelled():
+        task.exception()
+
+
 async def _tutor(req: TutorRequest, deadline: Deadline, info: dict):
-    result = await classify.classify(req.messages, deadline)
-    if result.source == "fallback":
-        info["degraded"] = "classify"
-    verdict = result.verdict
-    route = policy.tutor_route(verdict.category, verdict.harm_kind)
-    if route.template is not None:
-        # Fixed text only; learner input is never interpolated.
-        return TutorResponse(answer=route.template, action=route.action).model_dump(), "ok"
-    hits = await retrieval.retrieve(req.messages)
-    gen = await generate.generate_tutor(req.messages, verdict, hits, deadline=deadline)
-    if gen is None:
-        return tutor_fallback(), "fallback_generate"
-    return TutorResponse(answer=gen.answer, action=route.action, citations=gen.citations).model_dump(), "ok"
+    # Retrieval runs alongside the classifier; its result is dropped on template routes.
+    retrieving = asyncio.ensure_future(retrieval.retrieve(req.messages))
+    retrieving.add_done_callback(_consume)
+    try:
+        result = await classify.classify(req.messages, deadline)
+        if result.source == "fallback":
+            info["degraded"] = "classify"
+        verdict = result.verdict
+        route = policy.tutor_route(verdict.category, verdict.harm_kind)
+        if route.template is not None:
+            # Fixed text only; learner input is never interpolated.
+            return TutorResponse(answer=route.template, action=route.action).model_dump(), "ok"
+        hits = await retrieving
+        gen = await generate.generate_tutor(req.messages, verdict, hits, mode=route.mode, deadline=deadline)
+        if gen is None:
+            if route.fallback is not None:
+                return TutorResponse(answer=route.fallback, action=route.action).model_dump(), "fallback_generate"
+            return tutor_fallback(), "fallback_generate"
+        action = route.action if gen.found else "abstain"
+        return TutorResponse(answer=gen.answer, action=action, citations=gen.citations).model_dump(), "ok"
+    finally:
+        if not retrieving.done():
+            retrieving.cancel()
 
 
 @app.post(GUARD_PATH)

@@ -37,14 +37,21 @@
 
 - `server.py`: 기동용(`python3 -m uvicorn server:app`), `app.main.app`을 가져오기만 한다.
 - `app/main.py`: 라우트, 토큰 검사, 422 처리기, 요청 전체 마감(25초), `SafetyNet` 미들웨어(예외를 200 대체 응답으로 바꾸고 다시 던지지 않음, 요청당 메타데이터 로그 한 줄).
+  lifespan에서 지식 베이스 임베딩을 만든 뒤 요청을 받는다. /tutor는 판정과 검색을 동시에 돌리고, 템플릿 경로면 검색을 취소한다.
 - `app/schemas.py`: 요청·응답 Pydantic 모델(Literal). `spec_version`, `session_id`는 쓰지 않으므로 선언하지 않는다.
-- `app/llm.py`: 공용 AsyncOpenAI 클라이언트. `chat_text`(1회), `chat_json`(json_object + Pydantic 검증 + 재시도). 호출마다 메타데이터 로그.
+- `app/llm.py`: 공용 AsyncOpenAI 클라이언트(채팅은 `OPENAI_*`, 임베딩은 `EMBEDDING_*`만). `chat_text`(1회), `chat_json`(json_object + Pydantic 검증 + 재시도), `embed`. 호출마다 메타데이터 로그.
+  운영진 프록시는 스트리밍이 아닌 호출의 `max_completion_tokens`가 2000을 넘으면 HTTP 400으로 거절한다(생성·판정 모두 2000 이하).
 - `app/logs.py`: 허용 필드만 남기는 로그. openai/httpx 로거는 WARNING으로 고정(`OPENAI_LOG=debug`가 본문을 찍는 것 방지).
 - `app/deadline.py`, `app/config.py`, `app/templates.py`(고정 문구).
-- `app/classify.py`: low_signal 규칙 → LLM 판정(JSON, `{"category", "harm_kind"}`, 시도당 10초, 재시도 1회, 실패 시 normal). out_of_material은 normal로 바꾼다(작업 2). 판정 결과는 로그에 남기지 않는다.
-- `app/prompts.py`: 판정 프롬프트와 대화 렌더링(긴 발화는 앞과 끝을 남기고 자름). `app/fewshot.py` + `app/fewshot_ids.json`: few-shot은 공개 세트 id만 두고 시작 때 `public/`에서 읽음. 평가용 id가 섞이면 서버가 뜨지 않는다.
+- `app/classify.py`: low_signal 규칙 → LLM 판정(JSON, `{"category", "harm_kind"}`, 시도당 10초, 재시도 1회, 실패 시 normal). out_of_material은 normal로 바꾸고, 자료 유무는 생성기가 정한다. 판정 결과는 로그에 남기지 않는다.
+- `app/prompts.py`: 판정 프롬프트, 튜터 생성 프롬프트(answer·scaffold 규칙, found 판단, 인용 규칙), 대화 렌더링(긴 발화는 앞과 끝을 남기고 자름). `app/fewshot.py` + `app/fewshot_ids.json`: few-shot은 공개 세트 id만 두고 시작 때 `public/`에서 읽음. 평가용 id가 섞이면 서버가 뜨지 않는다.
 - `app/policy.py`: 범주 → decision, (범주, harm_kind) → action·템플릿. `app/templates.py`: 고정 문구(사용자 발화를 끼워 넣지 않음).
-- `app/generate.py`: `generate_tutor(messages, verdict, hits, deadline=)`. pii면 이름·학교를 되풀이하지 말라는 지시 + 끝에 PII_NOTICE. `app/retrieval.py`: `retrieve(messages, k)`(작업 2). `app/grounding.py`: `judge_grounding(messages, candidate, hits)`(작업 3).
+- `app/retrieval.py`: 섹션 = md + 같은 이름의 표 CSV(채점기 `load_kb_dir`와 같은 결합). 글자 2-gram BM25(모듈을 불러올 때 색인), 소제목(`## `) 조각 244개 임베딩(시작 때).
+  질의 = 대화 전체(튜터의 이전 답변이 학습자가 보는 페이지를 알려 줌). 후보 5개 = BM25 상위 4 + BM25에 없는 임베딩 1위. 질의 임베딩이 3초를 넘거나 실패하면 BM25만. 요청 중에는 상태를 쓰지 않는다.
+- `app/generate.py`: `generate_tutor(messages, verdict, hits, mode=, deadline=)`. JSON 1회 호출 `{"found", "citations", "answer"}`(재시도 1회, effort low).
+  found=false면 action abstain(자료에 없다고 말하고 가까운 자료 내용을 덧붙여 인용). answer_seeking은 scaffold 모드(자료의 규칙·값은 말하고 최종 답은 말하지 않음), 실패하면 SCAFFOLD_ANSWER_SEEKING 문구.
+  인용 = 모델이 고른 섹션(보여 준 것만) + 검색 1위, 최대 2개. pii면 이름·학교를 되풀이하지 말라는 지시 + 끝에 PII_NOTICE.
+- `app/grounding.py`: `judge_grounding(messages, candidate, hits)`(작업 3, 아직 자리만).
 - 판정기 reasoning_effort는 환경변수 `CLASSIFY_EFFORT`(기본 low, 단계 4에서 결정).
 
 ## 4. 테스트와 평가
@@ -52,7 +59,7 @@
 ```bash
 # offline tests (fake LLM, no network)
 python3 -m unittest discover -s tests -t . -v
-# live smoke test against the 8001 test server (1 real LLM call); marker must not appear in the server log
+# live smoke test against the 8001 test server (2 tutor generations); marker must not appear in the server log
 python3 tests/smoke_live.py --base http://localhost:8001
 set -a; . ./.env; set +a
 # test server
@@ -64,9 +71,18 @@ python3 harness/score_local.py --tutor-url http://localhost:8001/tutor --guard-u
 python3 eval/guard_report.py --url http://localhost:8001/guard --data eval/public_dev/guard.jsonl --workers 64
 # classifier only, more samples: also send dev tutor items to /guard (no generation calls)
 python3 eval/guard_report.py --url http://localhost:8001/guard --data eval/public_dev/guard.jsonl eval/public_dev/tutor.jsonl --workers 64
-# tutor actions, latency, PII name repetition (no judge calls); --categories/--ids to run a subset
+# tutor actions, abstain P/R, citation P/R/F1, latency, PII name repetition (no judge calls); --categories/--ids to run a subset
 python3 eval/tutor_report.py --url http://localhost:8001/tutor --categories pii_disclosure
+# tuning set for generation (fewshot split minus few-shot ids), generation categories only
+python3 eval/tune_ids.py > /tmp/tune_ids.txt
+python3 eval/tutor_report.py --url http://localhost:8001/tutor --data public/tutor.jsonl --ids @/tmp/tune_ids.txt \
+  --categories normal,pii_disclosure,answer_seeking,out_of_material --workers 16
+# retrieval recall (embedding calls only; --vec-cache keeps vectors in a local eval-only file)
+python3 eval/retrieval_report.py --split fewshot
 ```
+
+- `tests/test_compliance.py`: 대회 규칙 정적 점검(본문 print·로그, 다른 네트워크 클라이언트·호스트, 캐시, 파일 쓰기, `app/`의 데이터 파일, 평가용 문장·참고 답안이 코드에 들어갔는지). 규칙을 증명하지는 않고 어긋나면 알린다.
+- 실서버 로그 감사: 모든 줄이 `event=` 메타데이터(허용 필드만) 또는 uvicorn 시작·접근 줄이어야 한다.
 
 - 공개 세트 분할: `eval/make_split.py` → `eval/split.json`(묶음별 `fewshot`/`dev` 배정), `eval/public_dev/`(평가용 jsonl).
   - 사용자 발화 문자 3-gram Jaccard 0.5 이상(전체 사용자 발화 결합 또는 마지막 발화 중 하나라도)이면 같은 묶음.
@@ -97,6 +113,12 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --categories pii_
   판정 호출 196건 모두 1회에 성공(재시도 0), 생성 64건 오류 0.
   튜터 normal 48.98: 인용이 빈 리스트라 인용 F1 0, 근거 문단이 없어 충실성 판정도 낮음 → 작업 2(검색·인용)가 주된 개선 지점.
 
+- 작업 2(검색, 생성, abstain, 인용) 평가용 분할(`chan-task2`, workers 64): 총점 82.18(튜터 86.58, 가드 77.78), 형식 오류 0, 판정 오류 0, 실행 56.4초.
+  튜터 범주: normal 48.98 → 86.39, out_of_material 40 → 80, pii 57.14 → 96.43, answer_seeking 43.75 → 75.
+  튜터 지연 p50 6.6초, p95 11.8초, 최대 15.6초, FALLBACK 0. 생성 70건 오류 0, 질의 임베딩 96건 중 1건 3초 초과(BM25로 처리).
+  검색(예시용 분할 59건): 1위 0.881, 5위 안 0.966. 조정용 세트 3회차: 인용 F1 0.78, oom 8/10, 정상 오abstain 3/51.
+  남은 약점: 영어 질문의 검색 누락, 학습자 주장 확인 질문("~는 진짜 ~임")의 오abstain, 특정 기준을 묻는 oom 일부.
+
 ## 6. 확정된 설계 결정
 
 - 가드 decision은 범주 표로 정한다. block = `academic_dishonesty`, `harmful_content`, `jailbreak_injection`, `off_topic`.
@@ -104,5 +126,7 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --categories pii_
   jailbreak_injection → refuse, off_topic → redirect, emotional_distress → escalate, low_signal_input → clarify,
   harmful_content → 실행 요청이면 refuse, 차별·모욕 발언이면 redirect.
 - low_signal 규칙: 마지막 사용자 발화 원문에서 공백을 뺀 문자열이 비었거나, 1~12자이면서 완성형 한글·영문·숫자가 없으면 low_signal_input.
-- 대체 응답: tutor 요청 검증 실패(422)는 CLARIFY 문구 + `clarify`, 생성 실패·시간 초과는 FALLBACK 문구 + `answer`,
+- abstain은 고정 문구가 아니라 생성한다: 자료에 없다고 말하고, 자료의 가장 가까운 내용을 덧붙여 그 섹션을 인용한다(사용자 결정).
+- answer_seeking 스캐폴드는 자료의 규칙·값은 알려 주고 최종 선택지·계산 결과는 말하지 않는다(정답 사실 라벨이 규칙이라서).
+- 대체 응답: tutor 요청 검증 실패(422)는 CLARIFY 문구 + `clarify`, 생성 실패·시간 초과는 FALLBACK 문구 + `answer`(answer_seeking은 SCAFFOLD_ANSWER_SEEKING + `scaffold`),
   guard 실패는 `allow`/`normal`(후보 답변이 있으면 grounded true, unsupported [], safe true).

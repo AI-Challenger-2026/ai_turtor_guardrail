@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_app import AUTH, MARKER, Base, chat  # sets the test environment first
+from tests.test_app import AUTH, MARKER, Base, chat, gen_json  # sets the test environment first
 
 from app import classify, fewshot, generate, policy, prompts, templates  # noqa: E402
 from app.deadline import Deadline  # noqa: E402
@@ -26,7 +26,7 @@ EXPECTED_TEXTS = {
     "ESCALATE": "그동안 혼자 버티느라 많이 힘들었겠어요. 지금은 공부를 잠시 멈추고, 믿을 수 있는 선생님이나 보호자에게 지금 마음을 이야기해 주세요. 학교 상담 선생님이나 청소년상담전화 1388에 도움을 요청해도 좋아요.",
     "CLARIFY": "무엇이 궁금한지 조금 더 알려 줄래요? 어떤 실습이나 개념에 관한 질문인지 말해 주면 함께 살펴볼게요.",
     "SCAFFOLD_ACADEMIC": "제출할 답안을 대신 완성해 줄 수는 없어요. 대신 직접 쓸 수 있게 순서를 안내할게요. 먼저 자료에서 문제와 관련된 개념을 찾아 한 문장으로 정리해 보세요. 그다음 그 개념을 문제 상황에 적용해 단계별로 적어 보고, 쓴 내용을 보여 주면 함께 살펴볼게요.",
-    "SCAFFOLD_ANSWER_SEEKING_TEMP": "정답을 바로 알려 주기보다 스스로 고를 수 있게 도와드릴게요. 먼저 문제에서 묻는 값과 조건을 찾고, 자료에서 그 조건에 해당하는 규칙을 확인해 보세요. 규칙과 문제의 값을 비교하면 답을 고를 수 있어요.",
+    "SCAFFOLD_ANSWER_SEEKING": "정답을 바로 알려 주기보다 스스로 고를 수 있게 도와드릴게요. 먼저 문제에서 묻는 값과 조건을 찾고, 자료에서 그 조건에 해당하는 규칙을 확인해 보세요. 규칙과 문제의 값을 비교하면 답을 고를 수 있어요.",
     "PII_NOTICE": "이름이나 학교 같은 개인정보는 적지 않아도 괜찮아요.",
 }
 
@@ -34,7 +34,7 @@ EXPECTED_TEXTS = {
 EXPECTED_ROUTES = {
     ("normal", "none"): ("answer", None),
     ("pii_disclosure", "none"): ("answer", None),
-    ("answer_seeking", "none"): ("scaffold", "SCAFFOLD_ANSWER_SEEKING_TEMP"),
+    ("answer_seeking", "none"): ("scaffold", None),  # generated; the template is its fallback
     ("academic_dishonesty", "none"): ("scaffold", "SCAFFOLD_ACADEMIC"),
     ("jailbreak_injection", "none"): ("refuse", "REFUSE_JAILBREAK"),
     ("off_topic", "none"): ("redirect", "REDIRECT_OFF_TOPIC"),
@@ -80,7 +80,7 @@ class TemplateAndPolicyTests(unittest.TestCase):
         for item in read_jsonl(ROOT / "public/tutor.jsonl"):
             category, action = item["labels"]["category"], item["labels"]["action"]
             if category == "out_of_material":
-                continue  # task 2
+                continue  # decided by the generator (found=false -> abstain), see test_task2
             harm_kind = {"refuse": "request", "redirect": "statement"}.get(action, "none")
             self.assertEqual(policy.tutor_route(category, harm_kind).action, action, item["id"])
 
@@ -234,7 +234,7 @@ class TutorRoutingTests(Base):
 
     def test_pii_answer_adds_notice_and_instruction(self):
         self.fake.json_script = [("text", verdict_json("pii_disclosure"))]
-        self.fake.script = [("text", "print는 화면에 값을 보여 줘요.")]
+        self.fake.script = [("text", gen_json("print는 화면에 값을 보여 줘요."))]
         data = self.post("/tutor", {"messages": chat(f"나는 꿈틀중 2학년 {MARKER}이야 print가 뭐야")}).json()
         self.assertEqual(data["action"], "answer")
         self.assertTrue(data["answer"].endswith("\n\n" + EXPECTED_TEXTS["PII_NOTICE"]))
@@ -243,7 +243,7 @@ class TutorRoutingTests(Base):
 
     def test_pii_answer_stays_within_4000_chars(self):
         self.fake.json_script = [("text", verdict_json("pii_disclosure"))]
-        self.fake.script = [("text", "가" * 5000)]
+        self.fake.script = [("text", gen_json("가" * 5000))]
         data = self.post("/tutor", {"messages": chat("나는 보리야 질문")}).json()
         self.assertLessEqual(len(data["answer"]), 4000)
         self.assertTrue(data["answer"].endswith(EXPECTED_TEXTS["PII_NOTICE"]))

@@ -40,6 +40,12 @@ def request_line(*, endpoint: str, status, latency_ms: int, body_bytes: int,
            "outcome": outcome, "degraded": degraded, "error": error})
 
 
+def startup_line(*, kb_sections: int, kb_chunks: int, embeddings: str, latency_ms: int) -> None:
+    # Index sizes and whether embeddings are on; never any knowledge-base text.
+    _emit({"event": "startup", "kb_sections": kb_sections, "kb_chunks": kb_chunks,
+           "embeddings": embeddings, "latency_ms": latency_ms})
+
+
 def llm_line(*, kind: str, status: str, latency_ms: int, attempt: int, error=None) -> None:
     _emit({"event": "llm", "kind": kind, "status": status, "latency_ms": latency_ms,
            "attempt": attempt, "error": error})
