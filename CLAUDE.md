@@ -87,6 +87,9 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --data public/tut
   --categories normal,pii_disclosure,answer_seeking,out_of_material --workers 16
 # retrieval recall (embedding calls only; --vec-cache keeps vectors in a local eval-only file)
 python3 eval/retrieval_report.py --split fewshot
+# tutor points split into the grader's items (action, citation F1, gold facts, faithfulness); uses the local judge
+python3 eval/tutor_breakdown.py --url http://localhost:8001/tutor --data public/tutor.jsonl --ids @/tmp/tune_ids.txt \
+  --categories normal,pii_disclosure,answer_seeking,out_of_material --dump /tmp/breakdown.json
 # classifier only, in-process, leave-group-out on fewshot-split items (--dynamic 0 = static shots only)
 python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --json-out /tmp/run.json
 ```
@@ -139,6 +142,12 @@ python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --json-out 
   조정용 180건(묶음 제외 평가): 고정만 161건 정답(block F1 0.833, 범주 0.833, 정상 차단 7) → 동적 2회 162·165건(F1 0.840·0.892, 범주 0.833·0.879, 정상 차단 6·5).
   평가용 분할(workers 64): 총점 87.69(튜터 84.17, 가드 91.2), 형식 오류 0, 판정 오류 0, 실행 66.9초. 튜터 p95 12.9초·최대 14.4초, 가드 p95 8.8초·최대 11.6초, FALLBACK 0.
   평가용에서 매번 틀리던 가드 5건(정상 질문 차단 4, pii 누락 1)은 그대로 틀림. 점수 상승은 다른 문항(가드 harmful·jailbreak 100)에서 왔고, 일부는 회차 변동일 수 있다.
+
+- 공식 제출(`b394ab8`): 86점(로컬 평가용 87.69와 일치).
+- 생성 프롬프트 보강(용어 그대로, 관계없는 사실 덧붙이지 않기, 행동·단계 빠짐없이, 스캐폴드 조건 모두, 주장 확인 예시, found=false 전 모든 섹션 확인).
+  진단(조정용 생성 범주 65건, 로컬 판정): normal 84.75, 손실 행동 3.2·인용 5.1·사실 3.7·충실 3.2.
+  조정용 3회: 생성 범주 가중 평균 85.4 → 85.4 → 83.8 → 87.4. 2회차의 "답했으면 found=true" 규칙은 oom 행동을 0.8 → 0.6으로 망쳐 뺐다.
+  최종: normal 87.4(충실 0.872 → 0.979), oom 85, answer_seeking 93.8. 평가용 분할: 총점 88.28(튜터 86.08, 가드 90.47), 실행 56.0초, FALLBACK 0.
 
 ## 6. 확정된 설계 결정
 
