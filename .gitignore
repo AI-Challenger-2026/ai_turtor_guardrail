@@ -5,11 +5,11 @@
 __pycache__/
 *.py[cod]
 
-# 로컬 분석 문서와 개발 도구는 런박스로 전달하지 않습니다.
+# 로컬 분석 문서와 개발용 의존성 목록은 런박스로 전달하지 않습니다.
 /ANALYSIS.md
 /requirements.txt
-/scripts/dev.py
 
-# 로컬 테스트 결과는 실행할 때 다시 생성합니다.
+# 로컬 테스트 결과는 Git에서 제외합니다.
 /output/tests/
 submission.json
+AGENTS.md
