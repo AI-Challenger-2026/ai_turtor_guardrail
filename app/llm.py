@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -72,7 +73,18 @@ async def chat_json(system: str, user: str, **kw) -> dict:
     return out
 
 
+LOG_FILE = os.environ.get("LOG_FILE", str(Path(__file__).resolve().parents[1] / "logs" / "server.log"))
+
+
 def log(event: str, **fields):
-    """본문 없이 시간·길이·상태·오류 종류만 남긴다(SPEC §8)."""
+    """시간·길이·상태·오류 종류만 남긴다(SPEC §8: 요청·답변 본문과 문항 내용에서 나온 값은 남기지 않음).
+    화면과 파일(logs/server.log, git 제외)에 같이 쓴다 — 채점 뒤 오류·대체 횟수를 세기 위함."""
     parts = " ".join(f"{k}={v}" for k, v in fields.items())
-    print(f"{time.strftime('%H:%M:%S')} {event} {parts}", flush=True)
+    line = f"{time.strftime('%m-%d %H:%M:%S')} {event} {parts}"
+    print(line, flush=True)
+    try:
+        Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:  # noqa: BLE001
+        pass

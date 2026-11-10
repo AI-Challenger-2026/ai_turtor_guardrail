@@ -141,8 +141,8 @@ async def tutor(request: Request):
     except Exception as e:  # noqa: BLE001  — 어떤 경우에도 규격 응답
         status = f"error:{type(e).__name__}"
         messages, out = [], {"answer": FALLBACK, "action": "answer", "citations": []}
-    log("tutor", ms=int((time.time() - t0) * 1000), status=status, action=out["action"],
-        in_turns=len(messages), out_len=len(out["answer"]), n_cite=len(out["citations"]))
+    log("tutor", ms=int((time.time() - t0) * 1000), status=status,
+        in_len=sum(len(m["content"]) for m in messages), out_len=len(out["answer"]))
     return out
 
 
@@ -161,6 +161,6 @@ async def guard(request: Request):
         out = {"input": {"decision": "allow", "category": "normal"}}
         if cand is not None:
             out["output"] = {"grounded": True, "unsupported": [], "safe": True, "category": "normal"}
-    log("guard", ms=int((time.time() - t0) * 1000), status=status, decision=out["input"]["decision"],
-        has_cand=cand is not None)
+    log("guard", ms=int((time.time() - t0) * 1000), status=status,
+        in_len=sum(len(m["content"]) for m in messages), cand_len=len(cand or ""))
     return out
