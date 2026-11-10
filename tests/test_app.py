@@ -143,7 +143,9 @@ class FakeCompletions:
 class Base(unittest.TestCase):
     def setUp(self):
         self.fake = FakeCompletions()
-        self.patches = [mock.patch.object(llm, "_client", SimpleNamespace(chat=SimpleNamespace(completions=self.fake)))]
+        # One classifier call per request unless a test turns voting on (tests/test_classify.py VotingTests).
+        self.patches = [mock.patch.object(llm, "_client", SimpleNamespace(chat=SimpleNamespace(completions=self.fake))),
+                        mock.patch.object(config, "CLASSIFY_VOTES", 1)]
         for p in self.patches:
             p.start()
         self.cap = Capture()

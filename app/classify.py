@@ -2,17 +2,20 @@
 
 1. Rule: a last user turn with no meaningful characters is low_signal_input (no LLM call).
 2. LLM: category principles + contrast-pair few-shot, JSON mode, validated, one retry.
-   Any failure -> normal. out_of_material is not decided here (task 2) -> normal.
+   Majority vote: two calls at once, a third only if they disagree (config.CLASSIFY_VOTES).
+   All calls failing -> normal. out_of_material is not decided here (task 2) -> normal.
 The verdict has no free-text field, and it is never logged.
 """
+import asyncio
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import List, Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from . import config, llm, prompts
+from . import config, llm, policy, prompts
 from .deadline import Deadline
 from .fewshot import Shot, load_pool, load_shots
 from .retrieval import BM25
@@ -102,14 +105,53 @@ def build_prompt(messages: Sequence[Message], exclude: frozenset = frozenset()) 
     return [*_PREFIX, *dynamic, {"role": "user", "content": prompts.render(convo, **prompts.LIVE_LIMITS)}]
 
 
+def _key(verdict: Verdict):
+    return verdict.category, verdict.harm_kind
+
+
+def vote(verdicts: Sequence[Verdict]) -> Verdict:
+    """Majority over normalized verdicts, in call order; ties go to the earliest call.
+
+    1. a (category, harm_kind) pair named by more than half of the calls;
+    2. else a category named by more than half (harm_kind from its earliest call);
+    3. else the block/allow decision named by more than half (its earliest verdict);
+    4. else (two calls, one each way) the first call.
+    """
+    half = len(verdicts) / 2
+    pair, n = Counter(_key(v) for v in verdicts).most_common(1)[0]
+    if n > half:
+        return next(v for v in verdicts if _key(v) == pair)
+    category, n = Counter(v.category for v in verdicts).most_common(1)[0]
+    if n > half:
+        return next(v for v in verdicts if v.category == category)
+    blocks = [v for v in verdicts if policy.decision(v.category) == "block"]
+    allows = [v for v in verdicts if policy.decision(v.category) != "block"]
+    if len(blocks) > half:
+        return blocks[0]
+    if len(allows) > half:
+        return allows[0]
+    return verdicts[0]
+
+
+async def _ask(prompt: List[dict], deadline: Deadline):
+    verdict = await llm.chat_json(
+        "classify", prompt, Verdict, effort=config.CLASSIFY_EFFORT,
+        max_tokens=config.CLASSIFY_MAX_TOKENS, retries=config.CLASSIFY_RETRIES,
+        timeout=lambda: deadline.cap(config.CLASSIFY_TIMEOUT_S))
+    return None if verdict is None else normalize(verdict)
+
+
 async def classify(messages: Sequence[Message], deadline: Deadline, *, exclude: frozenset = frozenset()) -> Classification:
     last = next(m.content for m in reversed(messages) if m.role == "user")
     if is_low_signal(last):
         return Classification(Verdict(category="low_signal_input"), "rule")
-    verdict = await llm.chat_json(
-        "classify", build_prompt(messages, exclude), Verdict, effort=config.CLASSIFY_EFFORT,
-        max_tokens=config.CLASSIFY_MAX_TOKENS, retries=config.CLASSIFY_RETRIES,
-        timeout=lambda: deadline.cap(config.CLASSIFY_TIMEOUT_S))
-    if verdict is None:
+    prompt = build_prompt(messages, exclude)
+    first = 1 if config.CLASSIFY_VOTES == 1 else 2
+    verdicts = [v for v in await asyncio.gather(*(_ask(prompt, deadline) for _ in range(first))) if v is not None]
+    if config.CLASSIFY_VOTES >= 3 and len(verdicts) == 2 and _key(verdicts[0]) != _key(verdicts[1]):
+        third = await _ask(prompt, deadline)
+        if third is not None:
+            verdicts.append(third)
+    if not verdicts:
         return Classification(Verdict(category="normal"), "fallback")
-    return Classification(normalize(verdict), "llm")
+    return Classification(vote(verdicts), "llm")

@@ -20,6 +20,11 @@ if CLASSIFY_EFFORT not in ("minimal", "low", "medium"):
 CLASSIFY_MAX_TOKENS = 1000
 # Pool examples most similar to the request, added after the static few-shot (0 = static only).
 CLASSIFY_DYNAMIC_SHOTS = 6
+# Majority vote over independent classifier calls: two run at once and a third is asked only
+# when they disagree (same result as a 3-call majority, fewer calls). 1 = a single call.
+CLASSIFY_VOTES = int(os.environ.get("CLASSIFY_VOTES", "3"))
+if CLASSIFY_VOTES not in (1, 3):
+    raise RuntimeError("CLASSIFY_VOTES must be 1 or 3")
 
 GENERATE_EFFORT = "low"
 # The organizer proxy rejects (HTTP 400) non-streaming calls with max_completion_tokens > 2000.

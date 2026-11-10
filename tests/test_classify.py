@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s tests -v
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -264,6 +265,126 @@ class ClassifierTests(Base):
         with mock.patch("app.config.DEADLINE_MARGIN_S", 0.0):
             asyncio.run(classify.classify(msgs, Deadline(3.0)))
         self.assertLessEqual(self.fake.json_calls()[0]["timeout"], 3.0)
+
+
+class VotingSettingTests(unittest.TestCase):
+    def test_server_default_is_a_three_call_majority(self):
+        # Outside Base (which pins one call); the test environment leaves CLASSIFY_VOTES unset.
+        self.assertEqual(classify.config.CLASSIFY_VOTES, 3)
+
+
+class VotingTests(Base):
+    """Majority vote: two calls at once, a third only when they disagree."""
+
+    def setUp(self):
+        super().setUp()
+        self.votes = mock.patch.object(classify.config, "CLASSIFY_VOTES", 3)
+        self.votes.start()
+
+    def tearDown(self):
+        self.votes.stop()
+        super().tearDown()
+
+    def run_classify(self, *turns, deadline=25):
+        msgs = [Message(**m) for m in chat(*turns)]
+        return asyncio.run(classify.classify(msgs, Deadline(deadline)))
+
+    def test_agreement_takes_two_calls(self):
+        self.fake.json_script = [("text", verdict_json("off_topic"))] * 2
+        result = self.run_classify(f"질문 {MARKER}")
+        self.assertEqual((result.verdict.category, result.source), ("off_topic", "llm"))
+        self.assertEqual(len(self.fake.json_calls()), 2)
+
+    def test_first_two_calls_run_at_the_same_time(self):
+        self.fake.json_script = [("sleep", 0.3), ("sleep", 0.3)]
+        start = time.monotonic()
+        self.run_classify("질문")
+        self.assertLess(time.monotonic() - start, 0.55)
+
+    def test_disagreement_asks_a_third_and_takes_the_majority(self):
+        self.fake.json_script = [("text", verdict_json("jailbreak_injection")), ("text", verdict_json("normal")),
+                                 ("text", verdict_json("normal"))]
+        result = self.run_classify("질문")
+        self.assertEqual(result.verdict.category, "normal")
+        self.assertEqual(len(self.fake.json_calls()), 3)
+        self.fake.calls.clear()
+        self.fake.json_script = [("text", verdict_json("jailbreak_injection")), ("text", verdict_json("normal")),
+                                 ("text", verdict_json("jailbreak_injection"))]
+        self.assertEqual(self.run_classify("질문").verdict.category, "jailbreak_injection")
+
+    def test_harm_kind_disagreement_is_settled_by_the_third_call(self):
+        self.fake.json_script = [("text", verdict_json("harmful_content", "request")),
+                                 ("text", verdict_json("harmful_content", "statement")),
+                                 ("text", verdict_json("harmful_content", "statement"))]
+        result = self.run_classify("질문")
+        self.assertEqual((result.verdict.category, result.verdict.harm_kind), ("harmful_content", "statement"))
+        self.assertEqual(len(self.fake.json_calls()), 3)
+
+    def test_normalized_verdicts_count_as_agreement(self):
+        # out_of_material -> normal before voting, so this is agreement and needs no third call.
+        self.fake.json_script = [("text", verdict_json("out_of_material", "request")), ("text", verdict_json("normal"))]
+        self.assertEqual(self.run_classify("질문").verdict.model_dump(), {"category": "normal", "harm_kind": "none"})
+        self.assertEqual(len(self.fake.json_calls()), 2)
+
+    def test_three_different_answers(self):
+        cases = [
+            # category majority, harm_kind from its earliest call
+            (["harmful_content/request", "normal/none", "harmful_content/statement"], ("harmful_content", "request")),
+            # decision majority (two allow), earliest allow verdict
+            (["harmful_content/request", "pii_disclosure/none", "normal/none"], ("pii_disclosure", "none")),
+            # decision majority (two block)
+            (["normal/none", "off_topic/none", "jailbreak_injection/none"], ("off_topic", "none")),
+        ]
+        for answers, expected in cases:
+            with self.subTest(answers=answers):
+                self.fake.calls.clear()
+                self.fake.json_script = [("text", verdict_json(*a.split("/"))) for a in answers]
+                v = self.run_classify("질문").verdict
+                self.assertEqual((v.category, v.harm_kind), expected)
+
+    def test_vote_ties_go_to_the_first_call(self):
+        v = classify.vote([classify.Verdict(category="off_topic"), classify.Verdict(category="normal")])
+        self.assertEqual(v.category, "off_topic")
+
+    def test_one_failed_call_uses_the_other(self):
+        bad = ("text", "not json")
+        # The fake never yields, so call 1 and its retry run first (both bad), then call 2 (ok). No third call.
+        self.fake.json_script = [bad, bad, ("text", verdict_json("academic_dishonesty"))]
+        result = self.run_classify("질문")
+        self.assertEqual((result.verdict.category, result.source), ("academic_dishonesty", "llm"))
+        self.assertEqual(len(self.fake.json_calls()), 3)
+
+    def test_all_calls_failing_falls_back_to_normal(self):
+        self.fake.json_script = [("text", "not json")] * 4
+        result = self.run_classify("질문")
+        self.assertEqual((result.verdict.category, result.source), ("normal", "fallback"))
+        self.assertEqual(len(self.fake.json_calls()), 4)
+
+    def test_third_call_is_capped_by_the_request_budget(self):
+        self.fake.json_script = [("text", verdict_json("off_topic")), ("text", verdict_json("normal"))]
+        with mock.patch("app.config.DEADLINE_MARGIN_S", 0.0):
+            self.run_classify("질문", deadline=3.0)
+        self.assertEqual(len(self.fake.json_calls()), 3)
+        self.assertTrue(all(c["timeout"] <= 3.0 for c in self.fake.json_calls()))
+
+    def test_low_signal_still_skips_the_llm(self):
+        self.assertEqual(self.run_classify("ㅠㅠ").verdict.category, "low_signal_input")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_votes_are_not_logged(self):
+        self.fake.json_script = [("text", verdict_json("off_topic")), ("text", verdict_json("normal")),
+                                 ("text", verdict_json("normal"))]
+        r = self.post("/guard", {"messages": chat(f"질문 {MARKER}")})
+        self.assertEqual(r.json()["input"]["decision"], "allow")
+        self.assertEqual(len(self.fake.json_calls()), 3)
+        for line in self.cap.lines:
+            self.assertNotIn("off_topic", line)
+            self.assertNotIn("normal", line)
+
+    def test_tutor_route_uses_the_vote(self):
+        self.fake.json_script = [("text", verdict_json("off_topic")), ("text", verdict_json("off_topic"))]
+        data = self.post("/tutor", {"messages": chat(f"게임 공략 {MARKER}")}).json()
+        self.assertEqual((data["action"], data["answer"]), ("redirect", EXPECTED_TEXTS["REDIRECT_OFF_TOPIC"]))
 
 
 class TutorRoutingTests(Base):
