@@ -46,7 +46,8 @@
   운영진 프록시는 스트리밍이 아닌 호출의 `max_completion_tokens`가 2000을 넘으면 HTTP 400으로 거절한다(생성·판정 모두 2000 이하).
 - `app/logs.py`: 허용 필드만 남기는 로그. openai/httpx 로거는 WARNING으로 고정(`OPENAI_LOG=debug`가 본문을 찍는 것 방지).
 - `app/deadline.py`, `app/config.py`, `app/templates.py`(고정 문구).
-- `app/classify.py`: low_signal 규칙 → LLM 판정(JSON, `{"category", "harm_kind"}`, 시도당 10초, 재시도 1회, 실패 시 normal). out_of_material은 normal로 바꾸고, 자료 유무는 생성기가 정한다. 판정 결과는 로그에 남기지 않는다.
+- `app/classify.py`: low_signal 규칙 → LLM 판정(JSON, `{"category", "harm_kind"}`, 시도당 10초, 재시도 1회, 모두 실패 시 normal).
+  다수결: 판정 2회를 동시에 보내고 (범주, harm_kind)가 다르면 3번째로 다수결(`CLASSIFY_VOTES`, 환경변수 1 또는 3, 기본 3). 다수가 없으면 범주 → block/allow 다수 → 첫 호출 순. out_of_material은 normal로 바꾸고, 자료 유무는 생성기가 정한다. 판정 결과는 로그에 남기지 않는다.
   few-shot = 고정 20개 + 요청마다 고르는 비슷한 예시 6개(`CLASSIFY_DYNAMIC_SHOTS`, 가장 비슷한 것이 마지막). 예시 저장소는 예시용 분할 중 예시가 될 수 있는 143건(low_signal·out_of_material·공개 라벨로 harm_kind를 알 수 없는 가드 harmful 제외), 글자 2-gram BM25(마지막 발화 2배 + 이전 학습자 발화).
   `classify(..., exclude=)`는 평가 전용(묶음 제외 평가). 라우트는 쓰지 않는다(규칙 점검 테스트).
 - `app/fewshot.py` + `app/fewshot_ids.json`: id만 담는다. harm_kind는 공개 튜터 action에서만 얻는다(refuse → request, redirect → statement).
@@ -90,8 +91,10 @@ python3 eval/retrieval_report.py --split fewshot
 # tutor points split into the grader's items (action, citation F1, gold facts, faithfulness); uses the local judge
 python3 eval/tutor_breakdown.py --url http://localhost:8001/tutor --data public/tutor.jsonl --ids @/tmp/tune_ids.txt \
   --categories normal,pii_disclosure,answer_seeking,out_of_material --dump /tmp/breakdown.json
-# classifier only, in-process, leave-group-out on fewshot-split items (--dynamic 0 = static shots only)
-python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --json-out /tmp/run.json
+# classifier only, in-process, leave-group-out on fewshot-split items (--dynamic 0 = static shots only, --votes 1|3)
+python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --votes 3 --json-out /tmp/run.json
+# guard candidate judge only, in-process (no public examples in the judge, so every fewshot-split item is fair)
+python3 eval/ground_report.py --split fewshot --effort low --runs 2
 ```
 
 - `tests/test_task2.py`(검색·생성), `tests/test_task3.py`(가드 근거 판정·자료 확인·영어 번역 검색).
@@ -149,8 +152,23 @@ python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --json-out 
   조정용 3회: 생성 범주 가중 평균 85.4 → 85.4 → 83.8 → 87.4. 2회차의 "답했으면 found=true" 규칙은 oom 행동을 0.8 → 0.6으로 망쳐 뺐다.
   최종: normal 87.4(충실 0.872 → 0.979), oom 85, answer_seeking 93.8. 평가용 분할: 총점 88.28(튜터 86.08, 가드 90.47), 실행 56.0초, FALLBACK 0.
 
+- 판정기 다수결(`74a422a`): 조정용 180건 묶음 제외 2회씩, 투표 없음 → 투표: 정답 162·165 → 164·165, block F1 0.840·0.892 → 0.878·0.892,
+  같은 설정 2회 사이 범주가 바뀐 문항 9 → 5, block/allow가 바뀐 문항 4 → 1. 판정 호출 문항당 약 2.0회(3번째 호출은 약 5%).
+  평가용 분할(workers 64): 총점 88.3(튜터 86.0, 가드 90.6), 형식 오류 0, 판정 오류 0, 실행 65.9초, FALLBACK·degraded 0, 로그 감사 0줄.
+  지연: 튜터 p50 8.8초·p95 16.8초·최대 19.4초, 가드 p50 7.8초·p95 13.4초·최대 17.3초. 같은 실행에서 생성·근거 판정·임베딩 호출도 함께 느려져(프록시 전반) 투표만의 몫은 가르지 못함.
+- 같은 날 시험했으나 채택하지 않은 것(다시 하지 않기):
+  - 판정기 medium: pii 2~3/8 → 6~7/8이지만 정상 차단 5 → 6~8, block F1 하락, 판정 p95 약 11초·최대 24.5초.
+  - 판정기에 지식 베이스 섹션 제목 목록 넣기: 정답 165·165(투표만 164·165), 정상 차단 그대로 5.
+  - block 판정 재검증 호출(배우려는가/시키는가 이진 판정): 조정용 block 판정 83건 중 뒤집은 것 0(명백한 지어낸 예시는 맞게 판정).
+  - 예시 저장소를 공개 세트 전체(311건)로 확장: 묶음 제외로 평가용 200건 정답 175 → 175, 조정용 164·165 → 165. 저장소는 예시용 분할 그대로.
+  - 인용을 답변과 글자 겹침이 큰 섹션 하나로: 두 섹션 인용 문항 38건에서 F1 합 23.3 → 25.0, 회차별로 들쭉날쭉하고 충실성 위험.
+  - BM25 질의 변형(마지막 발화 가중, 학습자 발화만, 마지막 발화만): 지금(대화 전체)이 1위 52/59로 가장 좋음.
+  - 근거 판정 medium: 34건 중 6~7건 실패(시간·토큰), 근거 없음 놓침 1 → 6. low는 14/15 검출, 구간 F1 0.65~0.68(문장 통째로 잡는 경향).
+  - 튜터에 자료 확인 호출(`judge_found`) 추가: oom 7/10, 자료 있음 오판 2~3/55로 생성기(6~8/10, 1~4/55)와 비슷.
+
 ## 6. 확정된 설계 결정
 
+- 판정기는 low + 다수결(2회 동시, 다르면 3번째). 예시 저장소는 예시용 분할만(공개 세트 전체로 넓혀도 묶음 제외 평가에서 이득 없음).
 - 가드 decision은 범주 표로 정한다. block = `academic_dishonesty`, `harmful_content`, `jailbreak_injection`, `off_topic`.
 - 튜터 action: normal·pii_disclosure → answer, out_of_material → abstain, answer_seeking·academic_dishonesty → scaffold,
   jailbreak_injection → refuse, off_topic → redirect, emotional_distress → escalate, low_signal_input → clarify,
