@@ -176,7 +176,7 @@ class ClassifierTests(Base):
         self.assertEqual((result.verdict.category, result.verdict.harm_kind, result.source),
                          ("harmful_content", "statement", "llm"))
         call = self.fake.json_calls()[0]
-        self.assertEqual(call["extra_body"], {"reasoning_effort": "minimal"})
+        self.assertEqual(call["extra_body"], {"reasoning_effort": "low"})
         self.assertLessEqual(call["timeout"], 10)
 
     def test_out_of_material_becomes_normal_and_harm_kind_is_dropped(self):

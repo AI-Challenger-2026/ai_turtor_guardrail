@@ -45,7 +45,7 @@
 - `app/prompts.py`: 판정 프롬프트와 대화 렌더링(긴 발화는 앞과 끝을 남기고 자름). `app/fewshot.py` + `app/fewshot_ids.json`: few-shot은 공개 세트 id만 두고 시작 때 `public/`에서 읽음. 평가용 id가 섞이면 서버가 뜨지 않는다.
 - `app/policy.py`: 범주 → decision, (범주, harm_kind) → action·템플릿. `app/templates.py`: 고정 문구(사용자 발화를 끼워 넣지 않음).
 - `app/generate.py`: `generate_tutor(messages, verdict, hits, deadline=)`. pii면 이름·학교를 되풀이하지 말라는 지시 + 끝에 PII_NOTICE. `app/retrieval.py`: `retrieve(messages, k)`(작업 2). `app/grounding.py`: `judge_grounding(messages, candidate, hits)`(작업 3).
-- 판정기 reasoning_effort는 환경변수 `CLASSIFY_EFFORT`(기본 minimal).
+- 판정기 reasoning_effort는 환경변수 `CLASSIFY_EFFORT`(기본 low, 단계 4에서 결정).
 
 ## 4. 테스트와 평가
 
@@ -71,7 +71,8 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --categories pii_
 - 공개 세트 분할: `eval/make_split.py` → `eval/split.json`(묶음별 `fewshot`/`dev` 배정), `eval/public_dev/`(평가용 jsonl).
   - 사용자 발화 문자 3-gram Jaccard 0.5 이상(전체 사용자 발화 결합 또는 마지막 발화 중 하나라도)이면 같은 묶음.
   - (엔드포인트, 묶음 범주 조합)으로 층화, 고정 seed.
-- 평가용(`dev`) 문항은 프롬프트나 few-shot에 넣지 않는다. few-shot은 `fewshot` 분할의 공개 세트 id 목록만 두고 서버 시작 때 `public/`에서 불러온다.
+- 평가용(`dev`) 문항은 프롬프트나 few-shot에 넣지 않는다.
+- 프롬프트·few-shot 조정은 조정용 세트(`python3 eval/tune_ids.py`: 예시용 분할 중 few-shot이 아닌 문항)로 하고, 평가용은 단계 끝 확인에만 쓴다. few-shot은 `fewshot` 분할의 공개 세트 id 목록만 두고 서버 시작 때 `public/`에서 불러온다.
 
 ## 5. 기준선
 
@@ -83,6 +84,9 @@ python3 eval/tutor_report.py --url http://localhost:8001/tutor --categories pii_
   튜터 지연 p50 6.5초, p95 11.5초, 최대 14.5초. 생성 100건 중 1건 빈 응답 → FALLBACK.
 - 단계 3(판정기 minimal, few-shot 20개) 뒤 평가용 분할: 총점 65.35(튜터 59.0, 가드 71.71), 형식 오류 0, 판정 오류 0, 실행 59.8초.
   가드 block F1 0.759, 범주 정확도 0.690(상한 0.857), 후보 답변 0.682. 튜터 지연 p50 8.1초, p95 14.4초, 최대 21.5초.
+- 단계 4(reasoning_effort): 평가용 200건 + 조정용 180건(guard_report, guard와 tutor 문항)에서 low가 두 표본 모두 우세.
+  합계 block F1 minimal 0.787 → low 0.837, 범주 정확도(oom 제외) 0.750 → 0.785, harmful 재현율 27/38 → 34/38, pii 재현율 둘 다 4/19.
+  판정 호출 지연(64 동시) p50 약 2.1초 → 2.3초. low는 JSON 형식 실패가 약 1%(재시도로 대부분 복구).
 
 ## 6. 확정된 설계 결정
 

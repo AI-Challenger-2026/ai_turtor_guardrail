@@ -13,7 +13,8 @@ DEADLINE_MARGIN_S = 0.5
 # Input classifier: per-attempt budget, one retry, then "normal".
 CLASSIFY_TIMEOUT_S = 10.0
 CLASSIFY_RETRIES = 1
-CLASSIFY_EFFORT = os.environ.get("CLASSIFY_EFFORT", "minimal")
+# "low" beat "minimal" on both the dev and the tuning sample (step 4).
+CLASSIFY_EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")
 if CLASSIFY_EFFORT not in ("minimal", "low", "medium"):
     raise RuntimeError("CLASSIFY_EFFORT must be minimal, low or medium")
 CLASSIFY_MAX_TOKENS = 1000

@@ -352,6 +352,11 @@ class ChatJsonTests(Base):
         self.assertIsNone(self.run_json())
         self.assertEqual(len(self.fake.calls), 2)
 
+    def test_truncated_json_is_reported_and_retried(self):
+        self.fake.json_script = [("truncated", '{"ok": tr'), ("text", '{"ok": true}')]
+        self.assertEqual(self.run_json(), Verdict(ok=True))
+        self.assertTrue(any("error=TruncatedCompletion" in l and "attempt=1" in l for l in self.cap.lines))
+
     def test_no_call_when_budget_is_spent(self):
         self.assertIsNone(self.run_json(timeout=lambda: 0.0))
         self.assertEqual(self.fake.calls, [])

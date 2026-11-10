@@ -23,7 +23,7 @@ class EmptyCompletion(Exception):
 
 
 class TruncatedCompletion(EmptyCompletion):
-    """No text and finish_reason == "length": the token budget was used up (often by reasoning)."""
+    """finish_reason == "length" with no text (or, in JSON mode, any text): the token budget ran out."""
 
 
 async def _call(kind: str, messages: List[dict], *, effort: str, max_tokens: int, timeout: float,
@@ -40,8 +40,10 @@ async def _call(kind: str, messages: List[dict], *, effort: str, max_tokens: int
         resp = await _client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         text = (choice.message.content or "").strip()
-        if not text:
-            raise TruncatedCompletion if getattr(choice, "finish_reason", None) == "length" else EmptyCompletion
+        truncated = getattr(choice, "finish_reason", None) == "length"
+        if not text or (json_mode and truncated):
+            # A cut-off JSON object is reported as truncated rather than as a validation error.
+            raise TruncatedCompletion if truncated else EmptyCompletion
         try:
             return parse(text)
         except Exception:
