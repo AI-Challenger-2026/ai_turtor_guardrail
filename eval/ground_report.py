@@ -9,7 +9,7 @@ Per run: grounded accuracy (confusion), span F1 on gold-ungrounded items, and th
 output score (grounded correct + span F1 + safe correct) / 3. Prints ids and numbers only.
 
   python3 eval/ground_report.py --split fewshot --effort low --runs 2
-  python3 eval/ground_report.py --split fewshot --effort low --votes 2   # flag if any call flags
+  python3 eval/ground_report.py --split fewshot --judges 1   # single judge (server default: 2)
 """
 import argparse
 import asyncio
@@ -36,27 +36,12 @@ def load_items(split: str):
     return [it for it in items if it["id"] in ids and it.get("candidate_answer") and it["labels"]["decision"] == "allow"]
 
 
-async def judge(msgs, candidate, hits, votes):
-    outs = await asyncio.gather(*(grounding.judge_grounding(msgs, candidate, hits, deadline=Deadline(25))
-                                  for _ in range(votes)))
-    outs = [o for o in outs if o is not None]
-    if not outs:
-        return None
-    flagged = [o for o in outs if not o[0]]
-    if not flagged:
-        return True, []
-    spans = []
-    for _, s in flagged:
-        spans += s
-    return False, grounding.locate_spans(spans, candidate)
-
-
-async def one_run(items, hits_by_id, votes, sem):
+async def one_run(items, hits_by_id, sem):
     async def one(it):
         msgs = [Message(**m) for m in it["messages"]]
         async with sem:
             t0 = time.monotonic()
-            out = await judge(msgs, it["candidate_answer"], hits_by_id[it["id"]], votes)
+            out = await grounding.judge_grounding(msgs, it["candidate_answer"], hits_by_id[it["id"]], deadline=Deadline(25))
             took = time.monotonic() - t0
         gold_grounded = it["labels"]["grounded"] is not False
         gold_spans = it["labels"].get("unsupported") or []
@@ -88,12 +73,13 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="fewshot", choices=("fewshot", "dev"))
     ap.add_argument("--effort", default=config.GROUND_EFFORT, choices=("minimal", "low", "medium"))
-    ap.add_argument("--votes", type=int, default=1, help="judge calls per item; ungrounded if any call says so")
+    ap.add_argument("--judges", type=int, default=config.GROUND_JUDGES, choices=(1, 2, 3), help="grounding jury size")
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--dump", default="", help="eval-only JSON of per-item spans (public items)")
     a = ap.parse_args()
     config.GROUND_EFFORT = a.effort
+    config.GROUND_JUDGES = a.judges
     await retrieval.build_embeddings()
     items = load_items(a.split)
     sem = asyncio.Semaphore(a.workers)
@@ -101,8 +87,8 @@ async def main():
                                   for it in items))
     hits_by_id = {it["id"]: h for it, h in zip(items, hits)}
     for run in range(1, a.runs + 1):
-        rows = await one_run(items, hits_by_id, a.votes, sem)
-        report(rows, f"[{a.split} effort={a.effort} votes={a.votes} run {run}]")
+        rows = await one_run(items, hits_by_id, sem)
+        report(rows, f"[{a.split} effort={a.effort} judges={a.judges} run {run}]")
         if a.dump:
             Path(a.dump.replace(".json", f"_run{run}.json")).write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
 

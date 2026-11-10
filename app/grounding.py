@@ -5,6 +5,7 @@
 - judge_found: is what the learner asks covered by the materials? (False -> out_of_material.)
 Both return None on failure; the caller keeps its safe default. Results are never logged.
 """
+import asyncio
 import re
 from typing import List, Optional, Sequence, Tuple
 
@@ -60,11 +61,59 @@ def _sections(hits: Sequence[SectionHit]) -> List[tuple]:
     return [(h.section_id, h.text) for h in hits]
 
 
+def _common(a: str, b: str) -> str:
+    """Longest common substring of two short strings."""
+    best_len, best_end = 0, 0
+    prev = [0] * (len(b) + 1)
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        for j in range(1, len(b) + 1):
+            if a[i - 1] == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best_len:
+                    best_len, best_end = cur[j], i
+        prev = cur
+    return a[best_end - best_len:best_end]
+
+
+def agreed_spans(first: Sequence[str], second: Sequence[str], candidate: str) -> List[str]:
+    """For each span of the first judge, the text it shares with the second judge's spans.
+
+    Every span is a substring of the candidate, so the shared text is one too. Overlaps shorter
+    than AGREED_SPAN_MIN_CHARS (after trimming) are dropped; no agreement at all -> first's spans."""
+    out = []
+    for span in first:
+        shared = max((_common(span, other) for other in second), key=len, default="")
+        shared = shared.strip().strip(_WRAP)
+        if len(re.sub(r"\s", "", shared)) >= config.AGREED_SPAN_MIN_CHARS:
+            out.append(shared)
+    return locate_spans(out, candidate) or list(first)
+
+
 async def judge_grounding(messages: Sequence[Message], candidate: str, hits: Sequence[SectionHit], *,
                           deadline: Deadline) -> Optional[Tuple[bool, List[str]]]:
-    """(grounded, unsupported spans copied from the candidate), or None if the judge failed."""
+    """(grounded, unsupported spans copied from the candidate), or None if every judge failed.
+
+    config.GROUND_JUDGES independent calls at once. The majority of the judges that answered
+    decides, a tie goes to the first; spans are the text the first two flagging judges agree on
+    (or the one flagging judge's spans)."""
     if not candidate.strip():
         return True, []
+    outs = await asyncio.gather(*(_judge_once(messages, candidate, hits, deadline=deadline)
+                                  for _ in range(config.GROUND_JUDGES)))
+    outs = [o for o in outs if o is not None]
+    if not outs:
+        return None
+    flagged = [spans for grounded, spans in outs if not grounded]
+    if 2 * len(flagged) < len(outs) or (2 * len(flagged) == len(outs) and outs[0][0]):
+        return True, []
+    if len(flagged) == 1:
+        return False, flagged[0]
+    return False, agreed_spans(flagged[0], flagged[1], candidate)
+
+
+async def _judge_once(messages: Sequence[Message], candidate: str, hits: Sequence[SectionHit], *,
+                      deadline: Deadline) -> Optional[Tuple[bool, List[str]]]:
     prompt = [{"role": "system", "content": prompts.GROUND_SYSTEM},
               {"role": "user", "content": prompts.ground_user([m.model_dump() for m in messages],
                                                               _sections(hits), candidate)}]

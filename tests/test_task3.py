@@ -4,7 +4,9 @@ Run: python3 -m unittest discover -s tests -t . -v
 """
 import asyncio
 import json
+import time
 import unittest
+from unittest import mock
 
 from tests.test_app import MARKER, Base, chat  # sets the test environment first
 
@@ -103,6 +105,103 @@ class GuardCandidateTests(Base):
         joined = "\n".join(self.cap.lines)
         for word in ("grounded", "unsupported", "85점"):
             self.assertNotIn(word, joined)
+
+
+class AgreedSpanTests(unittest.TestCase):
+    def test_overlap_of_two_judges(self):
+        first = ["따라서 85점은 A 조건을 만족해요."]
+        second = ["85점은 A 조건을 만족해요"]
+        self.assertEqual(grounding.agreed_spans(first, second, CANDIDATE), ["85점은 A 조건을 만족해요"])
+
+    def test_each_first_span_keeps_its_best_overlap(self):
+        first = ["85점 이상이면 A를 받아요", "따라서 85점은 A 조건을 만족해요."]
+        second = ["이상이면 A를 받아요.", "A 조건을 만족해요"]
+        self.assertEqual(grounding.agreed_spans(first, second, CANDIDATE), ["이상이면 A를 받아요", "A 조건을 만족해요"])
+        for span in grounding.agreed_spans(first, second, CANDIDATE):
+            self.assertIn(span, CANDIDATE)
+
+    def test_short_or_no_overlap_falls_back_to_the_first_judge(self):
+        first = ["85점 이상이면 A를 받아요"]
+        self.assertEqual(grounding.agreed_spans(first, ["따라서"], CANDIDATE), first)
+        self.assertEqual(grounding.agreed_spans(first, ["A를"], CANDIDATE), first)  # 2 chars < minimum
+
+    def test_whole_answer_fallback_meets_a_real_span(self):
+        self.assertEqual(grounding.agreed_spans([CANDIDATE], ["85점 이상이면"], CANDIDATE), ["85점 이상이면"])
+
+
+class JurySettingTests(unittest.TestCase):
+    def test_server_default_is_three_judges(self):
+        # Outside Base (which pins one judge); the test environment leaves GROUND_JUDGES unset.
+        self.assertEqual(grounding.config.GROUND_JUDGES, 3)
+
+
+class JuryTests(Base):
+    """Three judges at once; the majority decides, a tie goes to the first judge."""
+
+    def setUp(self):
+        super().setUp()
+        self.jury = mock.patch.object(grounding.config, "GROUND_JUDGES", 3)
+        self.jury.start()
+
+    def tearDown(self):
+        self.jury.stop()
+        super().tearDown()
+
+    def judge(self, *scripts):
+        self.fake.scripts["ground"] = list(scripts)
+        return asyncio.run(grounding.judge_grounding(msgs(f"85점은 왜 A가 아니야 {MARKER}"), CANDIDATE, [],
+                                                     deadline=grounding.Deadline(25)))
+
+    OK = ("text", ground_json(True))
+    BAD = ("text", "not json")
+
+    def test_all_grounded(self):
+        self.assertEqual(self.judge(self.OK, self.OK, self.OK), (True, []))
+        self.assertEqual(len(self.fake.calls_of("ground")), 3)
+
+    def test_one_flag_out_of_three_stays_grounded(self):
+        self.assertEqual(self.judge(self.OK, ("text", ground_json(False, ["85점 이상이면 A를 받아요"])), self.OK), (True, []))
+
+    def test_two_flags_keep_what_they_agree_on(self):
+        out = self.judge(("text", ground_json(False, ["따라서 85점은 A 조건을 만족해요."])), self.OK,
+                         ("text", ground_json(False, ["85점은 A 조건을 만족해요"])))
+        self.assertEqual(out, (False, ["85점은 A 조건을 만족해요"]))
+
+    def test_three_flags_use_the_first_two(self):
+        out = self.judge(("text", ground_json(False, ["85점 이상이면 A를 받아요"])),
+                         ("text", ground_json(False, ["이상이면 A를 받아요."])),
+                         ("text", ground_json(False, ["따라서 85점은 A 조건을 만족해요."])))
+        self.assertEqual(out, (False, ["이상이면 A를 받아요"]))
+
+    def test_tie_after_a_failed_judge_goes_to_the_first(self):
+        # The fake never yields, so judge 1 (and its retry) run first, then judges 2 and 3.
+        flag = ("text", ground_json(False, ["85점 이상이면 A를 받아요"]))
+        self.assertEqual(self.judge(self.BAD, self.BAD, flag, self.OK), (False, ["85점 이상이면 A를 받아요"]))
+        self.fake.calls.clear()
+        self.assertEqual(self.judge(self.BAD, self.BAD, self.OK, flag), (True, []))
+
+    def test_all_judges_failing_returns_none(self):
+        self.assertIsNone(self.judge(*([self.BAD] * 6)))
+
+    def test_judges_run_at_the_same_time(self):
+        start = time.monotonic()
+        self.judge(("sleep", 0.3), ("sleep", 0.3), ("sleep", 0.3))
+        self.assertLess(time.monotonic() - start, 0.55)
+
+    def test_two_judge_tie_goes_to_the_first(self):
+        with mock.patch.object(grounding.config, "GROUND_JUDGES", 2):
+            flag = ("text", ground_json(False, ["85점 이상이면 A를 받아요"]))
+            self.assertEqual(self.judge(self.OK, flag), (True, []))
+            self.assertEqual(self.judge(flag, self.OK), (False, ["85점 이상이면 A를 받아요"]))
+
+    def test_guard_route_uses_the_jury(self):
+        self.fake.json_script = [("text", verdict_json("normal"))]
+        self.fake.scripts["ground"] = [("text", ground_json(False, ["따라서 85점은 A 조건을 만족해요."])),
+                                       ("text", ground_json(False, ["85점은 A 조건을 만족해요"])), self.OK]
+        data = self.post("/guard", {"messages": chat(f"85점은 왜 A가 아니야 {MARKER}"), "candidate_answer": CANDIDATE}).json()
+        self.assertEqual((data["output"]["grounded"], data["output"]["unsupported"]), (False, ["85점은 A 조건을 만족해요"]))
+        self.assertEqual(len(self.fake.calls_of("ground")), 3)
+        self.assertFalse(any("85점" in line for line in self.cap.lines))
 
 
 class GuardMaterialTests(Base):

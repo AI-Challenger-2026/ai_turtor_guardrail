@@ -59,7 +59,8 @@
 - `app/generate.py`: `generate_tutor(messages, verdict, hits, mode=, deadline=)`. JSON 1회 호출 `{"found", "citations", "answer"}`(재시도 1회, effort low).
   found=false면 action abstain(자료에 없다고 말하고 가까운 자료 내용을 덧붙여 인용). answer_seeking은 scaffold 모드(자료의 규칙·값은 말하고 최종 답은 말하지 않음), 실패하면 SCAFFOLD_ANSWER_SEEKING 문구.
   인용 = 모델이 고른 섹션(보여 준 것만) + 검색 1위, 최대 2개. pii면 이름·학교를 되풀이하지 말라는 지시 + 끝에 PII_NOTICE.
-- `app/grounding.py`: `judge_grounding(messages, candidate, hits, deadline=)` → (grounded, 근거 없는 구간). 구간은 후보 답변의 부분 문자열만 남긴다(따옴표·끝 구두점 정리, 겹침 제거, 최대 4개).
+- `app/grounding.py`: `judge_grounding(messages, candidate, hits, deadline=)` → (grounded, 근거 없는 구간).
+  배심원: 판정 `GROUND_JUDGES`회(환경변수 1~3, 기본 3)를 동시에, 다수결(동수면 첫 판정). 구간은 근거 없음이라 한 첫 두 판정이 겹치는 글자만(4자 미만이면 첫 판정 구간). 구간은 후보 답변의 부분 문자열만 남긴다(따옴표·끝 구두점 정리, 겹침 제거, 최대 4개).
   근거 없음인데 쓸 구간이 없으면 후보 답변 전체를 구간으로 낸다. 판정 실패 시 `(True, [])` + degraded=ground. `judge_found(messages, hits, deadline=)` → 자료 유무(실패 시 normal 유지 + degraded=found).
 - 판정기 reasoning_effort는 환경변수 `CLASSIFY_EFFORT`(기본 low, 단계 4에서 결정).
 
@@ -94,7 +95,7 @@ python3 eval/tutor_breakdown.py --url http://localhost:8001/tutor --data public/
 # classifier only, in-process, leave-group-out on fewshot-split items (--dynamic 0 = static shots only, --votes 1|3)
 python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --votes 3 --json-out /tmp/run.json
 # guard candidate judge only, in-process (no public examples in the judge, so every fewshot-split item is fair)
-python3 eval/ground_report.py --split fewshot --effort low --runs 2
+python3 eval/ground_report.py --split fewshot --judges 3 --runs 2
 ```
 
 - `tests/test_task2.py`(검색·생성), `tests/test_task3.py`(가드 근거 판정·자료 확인·영어 번역 검색).
@@ -169,8 +170,16 @@ python3 eval/ground_report.py --split fewshot --effort low --runs 2
     혼자서 block F1 0.66~0.71(LLM 투표 0.86~0.87). LLM 판정을 분류기가 확신할 때만 뒤집으면 369건 중 0~1건 변화.
     LLM이 틀린 문항에서 분류기 확률도 중앙값 0.43~0.46(정상 차단 17건 중 확률 0.3 미만 3건, 맞게 막은 82건 중에도 5건)이라 가를 수 없음.
 
+- 전략 단계(라우팅·배심원 계열, `chan-strategy`):
+  - S3 근거 판정 배심원(3명 다수결, 겹치는 구간) 채택. 예시용 가드 34건: 구간 F1 0.649~0.676(단일 4회) → 0.721·0.773, 후보 답변 점수 평균 0.931 → 0.938.
+    평가용 33건(마무리 확인): 구간 F1 0.627·0.661 → 0.767·0.719, 후보 답변 점수 0.925·0.921 → 0.953·0.933. 판정 지연 중앙값 약 +1초, 최대 10.5초.
+    "하나라도 근거 없음이면" 규칙(2명)은 근거 있는 답변 오판이 늘어 점수 0.934, "다르면 첫 판정"(2명)은 0.924.
+  - S2 페이지 재순위 호출(학습자가 보는 섹션을 LLM이 고름): 예시용 59건 정답 49·48 < 검색 1위 52. 채택 안 함.
+  - S1 투표가 갈릴 때 3번째 표를 medium으로(8초 상한, low 예비 표): 조정용 정답 164·165 → 165·167이었으나 평가용 200건 175 → 177, block F1 0.852 → 0.836(정상 차단 12 → 14), 판정 p95 5.3 → 9.2초. 채택 안 함.
+
 ## 6. 확정된 설계 결정
 
+- 가드 근거 판정은 3명 다수결 배심원, 구간은 판정끼리 겹치는 부분.
 - 판정기는 low + 다수결(2회 동시, 다르면 3번째). 예시 저장소는 예시용 분할만(공개 세트 전체로 넓혀도 묶음 제외 평가에서 이득 없음).
 - 가드 decision은 범주 표로 정한다. block = `academic_dishonesty`, `harmful_content`, `jailbreak_injection`, `off_topic`.
 - 튜터 action: normal·pii_disclosure → answer, out_of_material → abstain, answer_seeking·academic_dishonesty → scaffold,

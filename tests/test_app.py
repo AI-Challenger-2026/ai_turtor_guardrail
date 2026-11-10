@@ -143,9 +143,11 @@ class FakeCompletions:
 class Base(unittest.TestCase):
     def setUp(self):
         self.fake = FakeCompletions()
-        # One classifier call per request unless a test turns voting on (tests/test_classify.py VotingTests).
+        # One classifier call and one grounding judge per request unless a test turns voting or
+        # the jury on (tests/test_classify.py VotingTests, tests/test_task3.py JuryTests).
         self.patches = [mock.patch.object(llm, "_client", SimpleNamespace(chat=SimpleNamespace(completions=self.fake))),
-                        mock.patch.object(config, "CLASSIFY_VOTES", 1)]
+                        mock.patch.object(config, "CLASSIFY_VOTES", 1),
+                        mock.patch.object(config, "GROUND_JUDGES", 1)]
         for p in self.patches:
             p.start()
         self.cap = Capture()

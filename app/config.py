@@ -52,5 +52,15 @@ GROUND_EFFORT = "low"
 FOUND_EFFORT = "low"
 GUARD_JUDGE_MAX_TOKENS = 2000
 GUARD_JUDGE_RETRIES = 1
+# Candidate grounding as a jury of independent judge calls run at once: the majority decides
+# (a tie goes to the first judge); when two judges both mark spans, only the text they agree on
+# is kept (gold spans are short phrases, single judges tend to copy whole sentences).
+# On the fewshot split (34 items) and the dev split (33), three judges raised span F1 by about
+# 0.08-0.10 and the candidate output score from 0.931 to 0.938 and from 0.923 to 0.943.
+GROUND_JUDGES = int(os.environ.get("GROUND_JUDGES", "3"))
+if GROUND_JUDGES not in (1, 2, 3):
+    raise RuntimeError("GROUND_JUDGES must be 1, 2 or 3")
+# Shortest agreed span kept; shorter overlaps fall back to the first judge's spans.
+AGREED_SPAN_MIN_CHARS = 4
 
 ANSWER_MAX_CHARS = 4000
