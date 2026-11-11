@@ -36,9 +36,10 @@ MAX_ANSWER = 4000
 TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
+SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 튜터: 분류와 답변 생성 동시 시작
 GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_material 범주 판정(DEVLOG 13장)
 GUARD_OOM_MODE = os.environ.get("GUARD_OOM_MODE", "parallel")  # "parallel": 처음부터 동시 실행(기본) | "after": 분류가 normal일 때만 뒤이어 확인(가드 지연 증가로 기각)
-REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "26"))  # 전체 예산(초): 30초 제한 - 네트워크 여유
+REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "23"))  # 전체 예산(초). 서버 시간은 처리 함수 진입부터라, 부하 시 터널·프록시 대기(최대 약 5초)를 위해 30초에서 7초 여유(DEVLOG 14장)
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
 
 app = FastAPI(redirect_slashes=False, docs_url=None, redoc_url=None, openapi_url=None)
@@ -74,32 +75,53 @@ def retrieve(messages) -> List[Dict[str, str]]:
     return [KB_INDEX.secs[sid] for sid, _ in ranked[:TOP_K]]
 
 
+PII_NOTE = "이름이나 학교 같은 개인정보는 채팅에 적지 않아도 괜찮아요."
+
+
+async def _generate(messages, secs, mode, deadline):
+    try:
+        return await grounded_answer(messages, secs, mode, deadline=deadline)
+    except Exception as e:  # noqa: BLE001
+        log("tutor_llm_error", err=type(e).__name__)
+        return None
+
+
 async def tutor_logic(messages, t0) -> Dict:
+    """추측 실행: 검색·답변 생성(answer 모드)을 분류와 동시에 시작해 지연을 '합'에서 '둘 중 긴 쪽'으로 줄인다.
+    분류가 고정 응답 범주면 생성 결과는 버리고, 힌트·대필 모드일 때만 분류 뒤에 다시 생성한다.
+    (API가 느린 시점에 순차 구조는 생성이 26초 예산을 넘겨 기본 응답으로 대체됐다 — DEVLOG 14장.)"""
     deadline = t0 + REQUEST_BUDGET
+    secs = retrieve(messages)
+    gen_task = asyncio.create_task(_generate(messages, secs, "answer", deadline)) if SPECULATIVE else None
     c = await classify(messages, deadline=min(deadline, t0 + CLASSIFY_BUDGET))
     action = tutor_action(c["category"], c["harmful_type"])
     citations: List[str] = []
     fixed = template_for(c["category"], c["harmful_type"])
     if fixed is not None:
-        answer = fixed
-    else:
+        if gen_task:
+            gen_task.cancel()
+        return {"answer": fixed[:MAX_ANSWER], "action": action, "citations": citations}
+    if action == "scaffold" or gen_task is None:
+        if gen_task:
+            gen_task.cancel()
         if action == "scaffold":
             mode = "academic" if c["category"] == "academic_dishonesty" else "scaffold"
         else:
-            mode = "pii" if c["category"] == "pii_disclosure" else "answer"
-        try:
-            secs = retrieve(messages)
-            g = await grounded_answer(messages, secs, mode, deadline=deadline)
-            answer = g["answer"]
-            if g["found"]:
-                # 인용은 BM25 1위로 정한다: 공개 세트에서 LLM 선택 정확도 70% < BM25 1위 91%
-                # (같은 사실이 여러 섹션에 중복돼 있어 LLM은 제목이 그럴듯한 섹션을 고르는 경향).
-                citations = [secs[0]["id"]] if CITE_MODE == "bm25" else [g["evidence"]]
-            elif action == "answer":
-                action = "abstain"  # 자료에서 확인할 수 없는 질문 → 지어내지 않고 abstain
-        except Exception as e:  # noqa: BLE001
-            log("tutor_llm_error", err=type(e).__name__)
-            answer = FALLBACK
+            mode = "answer"
+        g = await _generate(messages, secs, mode, deadline)
+    else:
+        g = await gen_task
+    if g is None:
+        return {"answer": FALLBACK, "action": action, "citations": citations}
+    answer = g["answer"]
+    if g["found"]:
+        # 인용은 BM25 1위로 정한다: 공개 세트에서 LLM 선택 정확도 70% < BM25 1위 91%
+        # (같은 사실이 여러 섹션에 중복돼 있어 LLM은 제목이 그럴듯한 섹션을 고르는 경향).
+        citations = [secs[0]["id"]] if CITE_MODE == "bm25" else [g["evidence"]]
+    elif action == "answer":
+        action = "abstain"  # 자료에서 확인할 수 없는 질문 → 지어내지 않고 abstain
+    if c["category"] == "pii_disclosure" and "개인정보" not in answer:
+        answer = answer.rstrip() + " " + PII_NOTE  # 개인정보 안내는 코드로(이전의 pii 모드와 같은 문장)
     return {"answer": answer[:MAX_ANSWER], "action": action, "citations": citations}
 
 
