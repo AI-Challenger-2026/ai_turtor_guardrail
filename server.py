@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-
+from dotenv import load_dotenv
 from app.answer import grounded_answer
 from app.extract import extractive_answer
 from app.classify import classify
@@ -27,7 +27,13 @@ from app.llm import log
 from app.policy import guard_decision, template_for, tutor_action
 from app.verify import find_unsupported
 
-KB_INDEX = KB(use_embeddings=False)  # 서버 시작 때 색인 생성(BM25). 임베딩은 검색 평가에서 손해라 쓰지 않음.
+load_dotenv()
+
+KB_INDEX = KB(use_embeddings=False, expand="")  # 서버 시작 때 색인 생성(BM25). 가드 검증기 문맥용(확장 없음). 임베딩은 검색 평가에서 손해라 쓰지 않음.
+# 튜터 검색용 색인: 청크마다 한국어 질문·영어 용어/질문을 덧붙인 문서 확장(KB 본문으로 만든 kb_expansion.json, DEVLOG 22장).
+# 가드 검증기 문맥은 바꾸지 않으려고 색인을 분리했다(검색 변경이 가드를 흔든 12장 교훈). TUTOR_EXPAND=0이면 끈다.
+TUTOR_EXPAND = os.environ.get("TUTOR_EXPAND", "1") == "1"
+KB_TUTOR = KB(use_embeddings=False, expand="ko_questions,en_terms,en_questions") if TUTOR_EXPAND else KB_INDEX
 
 TOKEN = os.environ["TEAM_TOKEN"]
 FALLBACK = "지금은 답변을 만들 수 없어요. 잠시 후 다시 질문해 주세요."
@@ -74,7 +80,7 @@ async def read_payload(request: Request):
 
 
 def retrieve(messages) -> List[Dict[str, str]]:
-    ranked = KB_INDEX.rank(build_query(messages, "all"))
+    ranked = KB_TUTOR.rank(build_query(messages, "all"))
     return [KB_INDEX.secs[sid] for sid, _ in ranked[:TOP_K]]
 
 
