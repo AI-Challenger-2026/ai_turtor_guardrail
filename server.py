@@ -26,7 +26,7 @@ from app.llm import log
 from app.policy import guard_decision, template_for, tutor_action
 from app.verify import find_unsupported
 
-KB_INDEX = KB()  # 서버 시작 때 BM25 색인 생성(약 1.7초)
+KB_INDEX = KB(use_embeddings=False)  # 서버 시작 때 색인 생성(BM25). 임베딩은 검색 평가에서 손해라 쓰지 않음.
 
 TOKEN = os.environ["TEAM_TOKEN"]
 FALLBACK = "지금은 답변을 만들 수 없어요. 잠시 후 다시 질문해 주세요."
@@ -35,8 +35,11 @@ MAX_ANSWER = 4000
 # 답변 내용과 인용이 구조적으로 일치). A/B: 섹션 1/2/3/4개 = 86.3/84.5/86.1/82.7, 1개가 가장 안정·빠름(DEVLOG 5장).
 TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
-SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 분류와 답변 생성 동시 시작
-REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "26"))  # 전체 예산(초): 30초 제한 - 네트워크 여유
+CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
+SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 튜터: 분류와 답변 생성 동시 시작
+GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_material 범주 판정(DEVLOG 13장)
+GUARD_OOM_MODE = os.environ.get("GUARD_OOM_MODE", "parallel")  # "parallel": 처음부터 동시 실행(기본) | "after": 분류가 normal일 때만 뒤이어 확인(가드 지연 증가로 기각)
+REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "23"))  # 전체 예산(초). 서버 시간은 처리 함수 진입부터라, 부하 시 터널·프록시 대기(최대 약 5초)를 위해 30초에서 7초 여유(DEVLOG 14장)
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
 
 app = FastAPI(redirect_slashes=False, docs_url=None, redoc_url=None, openapi_url=None)
@@ -84,8 +87,9 @@ async def _generate(messages, secs, mode, deadline):
 
 
 async def tutor_logic(messages, t0) -> Dict:
-    """분류와 답변 생성을 동시에 시작한다(추측 실행). 지연 = 둘의 합 → 둘 중 긴 쪽.
-    분류가 고정 응답 범주면 생성 결과는 버리고, 힌트 모드(answer_seeking)일 때만 다시 생성한다."""
+    """추측 실행: 검색·답변 생성(answer 모드)을 분류와 동시에 시작해 지연을 '합'에서 '둘 중 긴 쪽'으로 줄인다.
+    분류가 고정 응답 범주면 생성 결과는 버리고, 힌트·대필 모드일 때만 분류 뒤에 다시 생성한다.
+    (API가 느린 시점에 순차 구조는 생성이 26초 예산을 넘겨 기본 응답으로 대체됐다 — DEVLOG 14장.)"""
     deadline = t0 + REQUEST_BUDGET
     secs = retrieve(messages)
     gen_task = asyncio.create_task(_generate(messages, secs, "answer", deadline)) if SPECULATIVE else None
@@ -100,7 +104,10 @@ async def tutor_logic(messages, t0) -> Dict:
     if action == "scaffold" or gen_task is None:
         if gen_task:
             gen_task.cancel()
-        mode = "scaffold" if action == "scaffold" else "answer"
+        if action == "scaffold":
+            mode = "academic" if c["category"] == "academic_dishonesty" else "scaffold"
+        else:
+            mode = "answer"
         g = await _generate(messages, secs, mode, deadline)
     else:
         g = await gen_task
@@ -110,11 +117,11 @@ async def tutor_logic(messages, t0) -> Dict:
     if g["found"]:
         # 인용은 BM25 1위로 정한다: 공개 세트에서 LLM 선택 정확도 70% < BM25 1위 91%
         # (같은 사실이 여러 섹션에 중복돼 있어 LLM은 제목이 그럴듯한 섹션을 고르는 경향).
-        citations = [secs[0]["id"]]
+        citations = [secs[0]["id"]] if CITE_MODE == "bm25" else [g["evidence"]]
     elif action == "answer":
         action = "abstain"  # 자료에서 확인할 수 없는 질문 → 지어내지 않고 abstain
     if c["category"] == "pii_disclosure" and "개인정보" not in answer:
-        answer = answer.rstrip() + " " + PII_NOTE  # 개인정보 안내는 코드로 붙인다(LLM 모드 불필요)
+        answer = answer.rstrip() + " " + PII_NOTE  # 개인정보 안내는 코드로(이전의 pii 모드와 같은 문장)
     return {"answer": answer[:MAX_ANSWER], "action": action, "citations": citations}
 
 
@@ -131,15 +138,38 @@ async def _verify(messages, cand: str, deadline) -> Optional[List[str]]:
         return None
 
 
+async def _material_found(messages, deadline) -> Optional[bool]:
+    """'자료에 답이 있나': 튜터와 같은 검색(1위 섹션) + 답변 생성기의 found 판단을 그대로 쓴다. 실패하면 None."""
+    try:
+        g = await grounded_answer(messages, retrieve(messages), "answer", deadline=deadline)
+        return bool(g["found"])
+    except Exception as e:  # noqa: BLE001
+        log("oom_check_error", err=type(e).__name__)
+        return None
+
+
 async def guard_logic(messages, cand: Optional[str], t0) -> Dict:
     deadline = t0 + REQUEST_BUDGET
+    # 분류 / 후보 답변 검증 / '자료에 있나' 확인을 동시에 실행(지연 = 셋 중 가장 긴 쪽)
+    found_task = asyncio.create_task(_material_found(messages, deadline)) if GUARD_OOM and GUARD_OOM_MODE == "parallel" else None
     if cand is not None and cand.strip():
-        # 입력 분류와 후보 답변 검증을 동시에 실행(지연 = 둘 중 긴 쪽)
         c, spans = await asyncio.gather(classify(messages, deadline=deadline), _verify(messages, cand, deadline))
     else:
         c, spans = await classify(messages, deadline=deadline), []
     decision = guard_decision(c["category"])
-    result = {"input": {"decision": decision, "category": c["category"]}}
+    category = c["category"]
+    if GUARD_OOM and GUARD_OOM_MODE != "parallel" and category == "normal":
+        if await _material_found(messages, deadline) is False:
+            category = "out_of_material"
+    if found_task is not None:
+        if category == "normal":
+            # 범주 점수는 정답이 normal이 아닌 문항만 채점하고 판정(allow)은 그대로라, 정상 질문을 out_of_material로
+            # 잘못 바꿔도 잃는 점수가 없다(비대칭). 공개 400문항: 가드 범주 정확도 0.78~0.83 → 0.90~0.95(DEVLOG 13장).
+            if await found_task is False:
+                category = "out_of_material"
+        else:
+            found_task.cancel()
+    result = {"input": {"decision": decision, "category": category}}
     if cand is not None:
         if decision == "block":
             # 막아야 할 입력에 대한 후보 답변 = 그 요청에 응한 답변 → unsafe.
@@ -148,7 +178,7 @@ async def guard_logic(messages, cand: Optional[str], t0) -> Dict:
         else:
             spans = spans or []  # 검증 실패(None)면 근거 있음으로 둔다(정상 답변을 깎지 않음)
             out = {"grounded": not spans, "unsupported": spans, "safe": True}
-        result["output"] = {**out, "category": c["category"]}
+        result["output"] = {**out, "category": category}
     return result
 
 

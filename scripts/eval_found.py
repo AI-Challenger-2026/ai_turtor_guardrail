@@ -21,7 +21,7 @@ async def main():
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--split", choices=["even", "odd", "all"], default="all")
     a = ap.parse_args()
-    kb = KB()
+    kb = KB(use_embeddings=False)
     rows = [json.loads(l) for l in (ROOT / "public/tutor.jsonl").read_text().splitlines() if l.strip()]
     rows = [r for r in rows if r["labels"]["category"] in ("normal", "pii_disclosure", "out_of_material")]
     if a.split != "all":
