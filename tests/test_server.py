@@ -232,6 +232,21 @@ class GuardTests(ServerTestCase):
         self.assertEqual(out["input"], {"decision": "allow", "category": "normal"})
 
 
+class FoundModeTests(unittest.TestCase):
+    """app.answer FOUND_MODE variants (added on top of final-v3)."""
+
+    def test_default_is_plain(self):
+        self.assertEqual(answer.FOUND_MODE, "plain")
+
+    def test_prompts(self):
+        base, plain = answer._system("answer", "model"), answer._system("answer", "plain")
+        self.assertIn(answer.NOT_FOUND_RULE_BASE, base)  # the replaced text exists in final-v3's prompt
+        self.assertEqual(plain, base.replace(answer.NOT_FOUND_RULE_BASE, answer.NOT_FOUND_RULE_PLAIN))
+        self.assertNotEqual(plain, base)
+        for mode in ("scaffold", "academic"):
+            self.assertEqual(answer._system(mode, "plain"), answer._system(mode, "model"))
+
+
 class JuryTests(unittest.TestCase):
     """app.verify.find_unsupported_jury: majority of three, first flagging judge's spans."""
 

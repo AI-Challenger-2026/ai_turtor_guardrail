@@ -46,6 +46,7 @@
   - /guard: 분류, 후보 답변 검증, 자료 확인(생성기 found)을 동시에. off_topic + found → normal. block이면 후보 답변 `{grounded: true, [], safe: false}`, allow면 검증 구간(없으면 grounded). 후보 답변 없이 normal인데 found=false면 out_of_material(decision은 allow).
 - `app/classify.py` + `app/classify_feat.py`: 예/아니오 신호 9개(self_pii, distress, jailbreak, harm, hate, submit_work, answer_only, off_topic, low_signal)를 3회 동시 판정, 신호별 과반 → 코드 우선순위 규칙으로 범주. 프롬프트 예시는 팀원이 쓴 문장(공개 문항 아님). 모두 실패하면 normal(flags 없음). low, 시도당 20초, 7초 헤지.
 - `app/answer.py`: 생성 프롬프트(concise_full: 근거 문장을 통째로 옮김), 모드 answer/scaffold/academic. `{"evidence","found","answer"}`, evidence가 보여 준 섹션이 아니면 found=false. 9초 헤지.
+  자료 없음 답변(우리가 더함, `FOUND_MODE` 기본 plain, model이면 final-v3 문구): answer 모드에서 found=false 답변에 자료의 값·규칙·이름을 덧붙이지 않는다(abstain은 인용이 없어 덧붙인 사실이 근거 없음으로 판정됨).
 - `app/verify.py`: 후보 답변의 과목 고유 사실 주장을 자료(후보 답변 가중 검색 상위 4섹션)와 대조, contradict·absent의 wrong_part를 구간으로. 후보 답변에 없는 구간, 응대·안내 문장(`_NON_CLAIM`)에 걸린 구간은 버린다.
   배심원(우리가 더함, `GROUND_JUDGES` 기본 3, 1이면 final-v3의 단일 헤지 호출): 3회 동시(헤지 없음), 다수결, 2명이 일치하면 셋째 취소. 근거 없음이면 보낸 순서로 첫 번째 지적한 판정의 구간. 실패한 판정은 조기 결정에 넣지 않고 최종 집계에서 근거 있음으로 센다. 모두 실패하면 근거 있음 + degraded=ground.
 - `app/kb.py`: 섹션 = md + 표 CSV, 청크 = `## ` 조각, 글자 2-gram BM25(서버 시작 때 색인), 질의 = 최근 6발화 + 마지막 발화. 임베딩은 쓰지 않는다.
@@ -194,6 +195,17 @@ python3 eval/log_summary.py logs/8000.log --last-run
   후보 답변 점수 단일 0.929 → 배심원 + 첫 판정 구간 0.938, 겹치는 구간 0.936, 합친 구간 0.921. 첫 판정 구간이 두 분할 모두 상승(예시용 0.931 → 0.941, 평가용 0.927 → 0.934),
   근거 있는 답변 오판 0.17 → 0건, 문항당 +0.0088(부트스트랩 95% 0.0017~0.0165). 단일 판정 6회가 엇갈린 문항은 67건 중 8건.
   예상 효과는 가드 +0.3, 총점 +0.15 정도로 작다. 서버에 넣은 뒤 스모크 18/18, 로그 감사 0줄. 부하(workers 64) 지연은 아직 재지 않았다.
+- 튜터 손실 지도(`0e9411f`, 조정용 튜터 100건 × 2회, `eval/tutor_breakdown.py` + `eval/v3_loss_map.py`): 튜터 90.62·86.75, 평균 손실 11.3점 중 두 번 다 잃은 몫 7.5점.
+  영어 질문의 검색 실패 약 2.9점(5건), 정상 질문 거절(분류기) 1.5점(2건), 자료 없는 질문에 답함 1.0점(한국어 2건), 한국어 검색 1위 오류 약 0.8점, 정답 사실 누락 약 0.5점, abstain 답변에 덧붙인 사실로 충실성 감점 0.5점.
+  고정 거절문을 로컬 판정기가 "응했다"고 본 손실 2.5점은 회차마다 흔들림(판정기 잡음, 손댈 수 없음).
+  검색 1위 정확도: 한국어 질문 105/112, 영어 질문 3/7.
+- 영어 질문 번역 검색(이전 우리 코드의 번역 프롬프트·용어집 이식, minimal) 채택 안 함(다시 하지 않기): 영어 공개 문항 14건 × 3회 번역(42회 호출), 근거 있는 7건의 1위 9/21 → 10/21(덧붙이기 1·2회, 원문 대신 모두 같음).
+  놓친 4건 중 2건은 언어가 아니라 내용 문제(코드 설명 질문, 퀴즈 근거가 다른 단원). minimal 번역은 질문 대신 용어집 항목을 내놓는 경우가 많았다.
+- 자기소개 pii 규칙(이전 우리 서버의 문형 규칙) 채택 안 함: 공개 400건 중 문형에 걸리는 14건이 모두 정답 pii(다른 범주 오탐 0)지만,
+  final-v3 분류기가 이미 12·13/14를 pii로 판정(놓친 normal 1건은 1회만, 나머지 1건은 academic이라 규칙 대상 아님). 규칙이 고치는 몫은 회당 0~1건(84회 호출, `eval/v3_classify_samples.py --only-pattern`).
+- 자료 없음 답변에서 사실 빼기(B) 채택, found 체크리스트(A) 채택 안 함(`eval/v3_found_check.py`, 공개 정상·pii·자료 없음 264건 × 변형별 2회, 생성 약 1,720회 + 판정 약 90회).
+  final-v3 → B: 자료 없음 검출 23.0 → 24.0/32, 정상·pii 잘못 abstain 15.5 → 12.5/232, 자료 없음 답변 충실성 20/27 → 29/29, 잘못 abstain한 정상 문항의 정답 사실 1.0/5 → 0/4. 두 분할 모두 개선.
+  A+B(예/아니오 두 칸이 모두 참일 때만 found): 검출 25.0이지만 잘못 abstain 23.5로 손해(다시 하지 않기).
 
 ## 6. 확정된 설계 결정
 
@@ -203,7 +215,7 @@ python3 eval/log_summary.py logs/8000.log --last-run
   jailbreak_injection → refuse, off_topic → redirect, emotional_distress → escalate, low_signal_input → clarify,
   harmful_content → harm이면 refuse, hate면 redirect.
 - 가드 out_of_material은 분류기가 아니라 생성기의 found로 정한다(후보 답변 없는 normal 입력만). 정상 문항을 oom으로 답해도 범주 정확도(정답 normal은 채점 안 함)와 block F1(둘 다 allow)에 손해가 없다.
-- abstain은 생성한다(자료에 없다고 말하고 가까운 내용을 한두 문장). final-v3는 abstain에 인용을 붙이지 않는다(팀원 실험: 1위 섹션을 인용하면 충실성 감점). 이전 우리 서버는 가까운 섹션을 인용했다.
+- abstain은 생성한다(자료에 없다고 말하고 다시 물어봐 달라고 안내, 자료의 사실은 덧붙이지 않음). 인용은 붙이지 않는다(팀원 실험: 1위 섹션을 인용하면 충실성 감점). 이전 우리 서버는 가까운 섹션을 인용했다.
 - low_signal_input은 분류기 신호로 정한다(이전 우리 서버의 글자 규칙은 없다).
 - 대체 응답: 생성 실패·시간 초과는 1위 섹션 발췌 + 인용(분류도 실패했으면 FALLBACK, academic은 고정 문구). 예외·응답 검증 실패는 tutor `answer` + FALLBACK, guard `allow`/`normal`(후보 답변이 있으면 grounded true, unsupported [], safe true).
 - 헤지 요청은 final-v3 그대로 둔다. 새로 더하는 반복 호출(배심원 등)에는 헤지를 붙이지 않는다.

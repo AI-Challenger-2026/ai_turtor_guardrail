@@ -48,16 +48,40 @@ MODE_RULES = {
 }
 
 
+# --- not-found answer without course facts (added on top of final-v3) --------------------------------
+# An abstain cites nothing, so the grader judges its faithfulness against no evidence: nearby facts
+# added to a "not in the material" answer read as unsupported. FOUND_MODE="plain" (default) asks the
+# not-found answer for no course facts, in answer mode only; "model" restores final-v3's wording.
+# Public normal/pii/oom items (264) x 2 runs: oom faithful 20/27 -> 29/29, oom caught 23 -> 24,
+# normal/pii wrongly abstained 15.5 -> 12.5, better on both splits (eval/v3_found_check.py).
+# A yes/no checklist gating found (asked_in_section, answer_in_section) was rejected: oom caught 25
+# but normal/pii abstained 23.5.
+FOUND_MODE = os.environ.get("FOUND_MODE", "plain")  # "plain" | "model" (final-v3)
+
+NOT_FOUND_RULE_PLAIN = ('   - found=false: "그 내용은 수업 자료에서 확인할 수 없어요"라고 정직하게 말하고 지어내지 않습니다. '
+                        '자료의 값·규칙·이름 같은 사실은 덧붙이지 않고, 수업에서 다룬 실습이나 개념으로 다시 물어봐 달라고 짧게 안내합니다.')
+NOT_FOUND_RULE_BASE = ('   - found=false: "그 내용은 수업 자료에서 확인할 수 없어요"라고 정직하게 말하고 지어내지 않습니다. '
+                       '자료에서 확인되는 가까운 내용이 있으면 한두 문장으로 안내합니다.')
+
+
+def _system(mode: str, found_mode: str) -> str:
+    system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""), found_rule=FOUND_RULES.get(ANSWER_STYLE, FOUND_RULES["default"]))
+    if found_mode != "plain" or mode != "answer":
+        return system
+    return system.replace(NOT_FOUND_RULE_BASE, NOT_FOUND_RULE_PLAIN)
+
+
 def render(messages: List[Dict[str, str]]) -> str:
     return "\n".join(f"{'학습자' if m.get('role') == 'user' else '튜터'}: {m.get('content', '')}" for m in messages)
 
 
 async def grounded_answer(messages, sections: List[Dict[str, str]], mode: str = "answer", deadline=None,
-                          kind: str = "generate") -> Dict:
+                          kind: str = "generate", found_mode: str = None) -> Dict:
     """sections: [{"id","title","text"}] (검색 순위대로). 반환: {"evidence", "found", "answer"}
-    kind는 호출 로그의 이름일 뿐이다(가드의 자료 확인은 "found")."""
+    kind는 호출 로그의 이름일 뿐이다(가드의 자료 확인은 "found"). found_mode 기본값은 FOUND_MODE."""
+    found_mode = found_mode or FOUND_MODE
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
-    system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""), found_rule=FOUND_RULES.get(ANSWER_STYLE, FOUND_RULES["default"]))
+    system = _system(mode, found_mode)
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n마지막 학습자 발화에 답하세요."
     out = await chat_json(system, user, effort=ANSWER_EFFORT, max_tokens=2000, timeout=20, deadline=deadline, hedge_after=9.0,
                           kind=kind)
