@@ -46,7 +46,8 @@
   - /guard: 분류, 후보 답변 검증, 자료 확인(생성기 found)을 동시에. off_topic + found → normal. block이면 후보 답변 `{grounded: true, [], safe: false}`, allow면 검증 구간(없으면 grounded). 후보 답변 없이 normal인데 found=false면 out_of_material(decision은 allow).
 - `app/classify.py` + `app/classify_feat.py`: 예/아니오 신호 9개(self_pii, distress, jailbreak, harm, hate, submit_work, answer_only, off_topic, low_signal)를 3회 동시 판정, 신호별 과반 → 코드 우선순위 규칙으로 범주. 프롬프트 예시는 팀원이 쓴 문장(공개 문항 아님). 모두 실패하면 normal(flags 없음). low, 시도당 20초, 7초 헤지.
 - `app/answer.py`: 생성 프롬프트(concise_full: 근거 문장을 통째로 옮김), 모드 answer/scaffold/academic. `{"evidence","found","answer"}`, evidence가 보여 준 섹션이 아니면 found=false. 9초 헤지.
-- `app/verify.py`: 후보 답변의 과목 고유 사실 주장을 자료(후보 답변 가중 검색 상위 4섹션)와 대조, contradict·absent의 wrong_part를 구간으로. 후보 답변에 없는 구간, 응대·안내 문장(`_NON_CLAIM`)에 걸린 구간은 버린다. 실패하면 근거 있음.
+- `app/verify.py`: 후보 답변의 과목 고유 사실 주장을 자료(후보 답변 가중 검색 상위 4섹션)와 대조, contradict·absent의 wrong_part를 구간으로. 후보 답변에 없는 구간, 응대·안내 문장(`_NON_CLAIM`)에 걸린 구간은 버린다.
+  배심원(우리가 더함, `GROUND_JUDGES` 기본 3, 1이면 final-v3의 단일 헤지 호출): 3회 동시(헤지 없음), 다수결, 2명이 일치하면 셋째 취소. 근거 없음이면 보낸 순서로 첫 번째 지적한 판정의 구간. 실패한 판정은 조기 결정에 넣지 않고 최종 집계에서 근거 있음으로 센다. 모두 실패하면 근거 있음 + degraded=ground.
 - `app/kb.py`: 섹션 = md + 표 CSV, 청크 = `## ` 조각, 글자 2-gram BM25(서버 시작 때 색인), 질의 = 최근 6발화 + 마지막 발화. 임베딩은 쓰지 않는다.
 - `app/extract.py`: 생성 실패 시 1위 섹션에서 질문과 겹치는 문장 2개. `app/policy.py`: 범주 → decision·action, 고정 문구.
 - `app/llm.py`: AsyncOpenAI(`OPENAI_*` 환경변수), json_object, 재시도 1회, 헤지(느리면 같은 요청 하나 더, 먼저 성공한 쪽), deadline. 호출마다 메타데이터 한 줄(kind, status, attempt, hedge).
@@ -189,6 +190,10 @@ python3 eval/log_summary.py logs/8000.log --last-run
   같은 분할의 이전 우리 `7d44c16` 5회 평균은 87.50(튜터 84.48, 가드 90.51). final-v3는 공개 400건 전체로 조정됐으므로 이 비교는 final-v3 쪽으로 낙관적이다.
   지연: 튜터 p50 5.4~7.6초·p95 11.0~14.8초·최대 23.0초(생성 시간 초과 1건 → academic 고정 문구), 가드 p50 4.6~5.7초·p95 9.4~10.7초·최대 13.6초. 호출 874~1,008회(헤지 21~154).
   1회차 로그에 asyncio 트레이스백 1건(헤지 경로, `ValueError: empty completion`, 본문 없음) → 헤지 정리로 고침, 고친 코드로 스모크 18/18·로그 감사 0줄.
+- 2단계 근거 판정 배심원(`eval/v3_ground_samples.py`): 후보 답변이 있는 허용 문항 67건 × 단일 판정 6회(413회 호출), 같은 표본으로 규칙 비교.
+  후보 답변 점수 단일 0.929 → 배심원 + 첫 판정 구간 0.938, 겹치는 구간 0.936, 합친 구간 0.921. 첫 판정 구간이 두 분할 모두 상승(예시용 0.931 → 0.941, 평가용 0.927 → 0.934),
+  근거 있는 답변 오판 0.17 → 0건, 문항당 +0.0088(부트스트랩 95% 0.0017~0.0165). 단일 판정 6회가 엇갈린 문항은 67건 중 8건.
+  예상 효과는 가드 +0.3, 총점 +0.15 정도로 작다. 서버에 넣은 뒤 스모크 18/18, 로그 감사 0줄. 부하(workers 64) 지연은 아직 재지 않았다.
 
 ## 6. 확정된 설계 결정
 
@@ -202,3 +207,4 @@ python3 eval/log_summary.py logs/8000.log --last-run
 - low_signal_input은 분류기 신호로 정한다(이전 우리 서버의 글자 규칙은 없다).
 - 대체 응답: 생성 실패·시간 초과는 1위 섹션 발췌 + 인용(분류도 실패했으면 FALLBACK, academic은 고정 문구). 예외·응답 검증 실패는 tutor `answer` + FALLBACK, guard `allow`/`normal`(후보 답변이 있으면 grounded true, unsupported [], safe true).
 - 헤지 요청은 final-v3 그대로 둔다. 새로 더하는 반복 호출(배심원 등)에는 헤지를 붙이지 않는다.
+- 가드 후보 답변 검증은 3명 배심원(다수결, 첫 지적 판정의 구간, 2명 일치하면 셋째 취소).

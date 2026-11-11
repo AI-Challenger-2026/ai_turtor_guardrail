@@ -33,7 +33,7 @@ from app.kb import KB, build_query
 from app.llm import DeadlineExceeded
 from app.policy import guard_decision, template_for, tutor_action
 from app.schemas import GuardResponse, TutorResponse
-from app.verify import find_unsupported
+from app.verify import find_unsupported, find_unsupported_jury
 
 logs.setup()
 _t_start = time.perf_counter()
@@ -56,6 +56,9 @@ GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_mater
 GUARD_OOM_MODE = os.environ.get("GUARD_OOM_MODE", "parallel")  # "parallel": 처음부터 동시 실행(기본) | "after": 분류가 normal일 때만 뒤이어 확인(가드 지연 증가로 기각)
 REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "23"))  # 전체 예산(초). 서버 시간은 처리 함수 진입부터라, 부하 시 터널·프록시 대기(최대 약 5초)를 위해 30초에서 7초 여유(DEVLOG 14장)
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
+# Guard candidate verifier jury (added on top of final-v3): N calls at once, majority, two that agree
+# decide. 1 = final-v3's single hedged call.
+GROUND_JUDGES = int(os.environ.get("GROUND_JUDGES", "3"))
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -175,7 +178,10 @@ def retrieve_for_candidate(messages, cand: str) -> List[Dict[str, str]]:
 
 async def _verify(messages, cand: str, deadline) -> Optional[List[str]]:
     try:
-        return await find_unsupported(messages, cand, retrieve_for_candidate(messages, cand), deadline=deadline)
+        sections = retrieve_for_candidate(messages, cand)
+        if GROUND_JUDGES > 1:
+            return await find_unsupported_jury(messages, cand, sections, deadline=deadline, judges=GROUND_JUDGES)
+        return await find_unsupported(messages, cand, sections, deadline=deadline)
     except Exception as e:  # noqa: BLE001
         logs.degrade("ground", e)
         return None

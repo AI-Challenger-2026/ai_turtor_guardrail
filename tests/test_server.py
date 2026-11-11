@@ -232,6 +232,71 @@ class GuardTests(ServerTestCase):
         self.assertEqual(out["input"], {"decision": "allow", "category": "normal"})
 
 
+class JuryTests(unittest.TestCase):
+    """app.verify.find_unsupported_jury: majority of three, first flagging judge's spans."""
+
+    def setUp(self):
+        self._single = verify.find_unsupported
+
+    def tearDown(self):
+        verify.find_unsupported = self._single
+
+    def run_jury(self, behaviours):
+        """behaviours[i] for judge i (launch order): (delay_s, spans or Exception)."""
+        state = {"n": 0, "cancelled": 0, "hedge": []}
+
+        async def fake(messages, candidate, sections, deadline=None, hedge_after=9.0):
+            i = state["n"]
+            state["n"] += 1
+            state["hedge"].append(hedge_after)
+            delay, value = behaviours[i]
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                state["cancelled"] += 1
+                raise
+            if isinstance(value, Exception):
+                raise value
+            return value
+        verify.find_unsupported = fake
+
+        async def go():
+            try:
+                return await verify.find_unsupported_jury([], "cand", [], judges=3)
+            finally:
+                await asyncio.sleep(0)
+        try:
+            out = asyncio.run(go())
+        except RuntimeError as e:
+            out = e
+        return out, state
+
+    def test_majority_flags_with_first_flagging_judges_spans(self):
+        out, state = self.run_jury([(0.01, ["A"]), (0.02, []), (0.03, ["B"])])
+        self.assertEqual(out, ["A"])
+        self.assertEqual(state["hedge"], [None, None, None])  # no hedging inside the jury
+
+    def test_single_flag_is_outvoted(self):
+        out, _ = self.run_jury([(0.01, ["A"]), (0.02, []), (0.03, [])])
+        self.assertEqual(out, [])
+
+    def test_two_agreeing_judges_decide_and_the_third_is_cancelled(self):
+        out, state = self.run_jury([(0.01, []), (0.02, []), (5, ["A"])])
+        self.assertEqual((out, state["cancelled"]), ([], 1))
+        out, state = self.run_jury([(5, []), (0.01, ["B"]), (0.02, ["C"])])
+        self.assertEqual((out, state["cancelled"]), (["B"], 1))
+
+    def test_failed_judges_do_not_decide_early_and_count_as_grounded(self):
+        out, state = self.run_jury([(0.01, ValueError("x")), (0.02, ValueError("y")), (0.05, ["A"])])
+        self.assertEqual((out, state["cancelled"]), ([], 0))
+        out, _ = self.run_jury([(0.01, ValueError("x")), (0.02, ["A"]), (0.03, ["B"])])
+        self.assertEqual(out, ["A"])
+
+    def test_all_failed_raises(self):
+        out, _ = self.run_jury([(0.01, ValueError("x"))] * 3)
+        self.assertIsInstance(out, RuntimeError)
+
+
 class HedgeTests(unittest.TestCase):
     """Port fixes in app.llm._hedged (final-v3 leaked an uncollected exception and orphan calls)."""
 
