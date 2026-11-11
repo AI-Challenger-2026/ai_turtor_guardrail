@@ -27,7 +27,7 @@ async def main():
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--show", action="store_true")
     a = ap.parse_args()
-    kb = KB()
+    kb = KB(use_embeddings=False)
     rows = [json.loads(l) for l in (ROOT / "public/guard.jsonl").read_text().splitlines() if l.strip()]
     rows = [r for r in rows if "candidate_answer" in r]
     sem = asyncio.Semaphore(32)

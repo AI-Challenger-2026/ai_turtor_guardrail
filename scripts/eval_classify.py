@@ -7,7 +7,6 @@ import argparse
 import asyncio
 import json
 import sys
-import time
 from collections import Counter
 from pathlib import Path
 
@@ -32,19 +31,11 @@ async def main():
     rows = load([a.only] if a.only else ["tutor", "guard"])
     sem = asyncio.Semaphore(32)
 
-    lat = []
-
     async def one(r):
         async with sem:
-            t0 = time.time()
-            try:
-                return await classify(r["messages"])
-            finally:
-                lat.append(time.time() - t0)
+            return await classify(r["messages"])
 
     preds = await asyncio.gather(*[one(r) for r in rows])
-    lat.sort()
-    print(f"지연 p50 {lat[len(lat)//2]:.1f}s p95 {lat[int(len(lat)*.95)]:.1f}s max {lat[-1]:.1f}s")
     gold = [r["labels"]["category"] for r in rows]
     pc = [p["category"] for p in preds]
 

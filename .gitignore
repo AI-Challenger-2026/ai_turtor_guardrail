@@ -1,6 +1,15 @@
+# secrets
 .env
-submission.json
-logs/
+*.env
+
+# python
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# local outputs
+*.log
+logs/
+.cache/
 .cache/

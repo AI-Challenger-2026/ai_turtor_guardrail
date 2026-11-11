@@ -3,17 +3,10 @@
 - 구간은 후보 답변에서 그대로 옮긴 문자열이어야 한다(채점은 문자 단위 F1, 공백·문장부호 무시).
 - LLM이 낸 구간 중 후보 답변에 실제로 들어 있지 않은 것은 버린다(지어낸 구간 방지).
 """
-import asyncio
-import os
 import re
-from collections import Counter
 from typing import Dict, List
 
 from .llm import chat_json
-
-VERIFY_EFFORT = os.environ.get("VERIFY_EFFORT", "low")  # 가드는 지연 여유가 커서 추론을 올려 볼 수 있다(DEVLOG 15장)
-VERIFY_HEDGE = float(os.environ.get("VERIFY_HEDGE", "9"))
-VERIFY_VOTES = int(os.environ.get("VERIFY_VOTES", "1"))  # 3이면 구간이 과반 표에서 나올 때만 인정(DEVLOG 20장)
 
 SYSTEM = """너는 중학생용 학습 플랫폼(파이썬 기초, AI 프롬프트 활용, 금융 리터러시)에서 AI 튜터의 [후보 답변]을 [자료]와 대조하는 사실 검증기다.
 과정에 나오는 은행·상품·가게·인물·모듈·AI 도구(다람쥐은행, 꿈틀 중학교, kkumtle, Helpy 등)와 실습의 값·규칙은 수업용 가상 설정이라, 일반 상식이 아니라 [자료]에 적힌 것만 맞다.
@@ -72,11 +65,10 @@ def render(messages: List[Dict[str, str]]) -> str:
     return "\n".join(f"{'학습자' if m.get('role') == 'user' else '튜터'}: {m.get('content', '')}" for m in messages)
 
 
-async def find_unsupported(messages, candidate: str, sections: List[Dict[str, str]], deadline=None, effort=None) -> List[str]:
+async def find_unsupported(messages, candidate: str, sections: List[Dict[str, str]], deadline=None) -> List[str]:
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n[후보 답변]\n{candidate}"
-    out = await chat_json(SYSTEM, user, effort=effort or VERIFY_EFFORT, max_tokens=2000, timeout=20, deadline=deadline,
-                          hedge_after=VERIFY_HEDGE)
+    out = await chat_json(SYSTEM, user, effort="low", max_tokens=2000, timeout=20, deadline=deadline, hedge_after=9.0)
     spans = []
     for c in out.get("claims") or []:
         if not isinstance(c, dict) or c.get("verdict") not in ("contradict", "absent"):
@@ -90,34 +82,4 @@ async def find_unsupported(messages, candidate: str, sections: List[Dict[str, st
         if isinstance(s, str) and s.strip() and _norm(s) and _norm(s) in cand_n and s not in keep \
                 and not _is_non_claim(candidate, s):
             keep.append(s.strip())
-    return keep
-
-
-def _char_f1(a: str, b: str) -> float:
-    ca, cb = Counter(_norm(a)), Counter(_norm(b))
-    inter = sum((ca & cb).values())
-    if not inter:
-        return 0.0
-    p, r = inter / sum(ca.values()), inter / sum(cb.values())
-    return 2 * p * r / (p + r)
-
-
-async def find_unsupported_vote(messages, candidate, sections, deadline=None, votes=None, effort=None) -> List[str]:
-    """같은 검증을 votes번 병렬로 돌려, 비슷한 구간(글자 F1 0.5 이상)이 과반 표에서 나온 것만 인정한다.
-    정상 답변 오탐(실행마다 흔들리는 구간)을 줄이려는 다수결이다. votes=1이면 한 번만 부른다."""
-    n = votes or VERIFY_VOTES
-    if n <= 1:
-        return await find_unsupported(messages, candidate, sections, deadline=deadline, effort=effort)
-    outs = await asyncio.gather(*[find_unsupported(messages, candidate, sections, deadline=deadline, effort=effort)
-                                  for _ in range(n)], return_exceptions=True)
-    ok = [o for o in outs if isinstance(o, list)]
-    if not ok:
-        raise RuntimeError("all verify votes failed")
-    need = len(ok) // 2 + 1
-    keep: List[str] = []
-    for spans in ok:
-        for sp in spans:
-            support = sum(any(_char_f1(sp, t) >= 0.5 for t in other) for other in ok)
-            if support >= need and not any(_char_f1(sp, k) >= 0.5 for k in keep):
-                keep.append(sp)
     return keep

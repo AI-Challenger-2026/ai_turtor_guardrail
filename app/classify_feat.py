@@ -1,4 +1,4 @@
-"""분류기 v3: LLM은 예/아니오 신호만 뽑고, 범주는 코드의 우선순위 규칙으로 정한다.
+"""v3 분류기: LLM은 예/아니오 신호만 뽑고, 범주는 코드의 우선순위 규칙으로 정한다.
 
 작은 모델이 10개 범주의 우선순위를 한 번에 판단하는 대신, 독립적인 질문 여러 개에 답하게 한다.
 예시는 팀이 새로 쓴 문장이다(공개 세트 문항 복사 아님).
@@ -67,3 +67,7 @@ def decide(f: Dict[str, bool]) -> Dict[str, str]:
         return {"category": "pii_disclosure", "harmful_type": "none"}
     return {"category": "normal", "harmful_type": "none"}
 
+
+def parse(out: dict) -> Dict[str, str]:
+    flags = {k: out.get(k) is True for k in FLAGS}
+    return {**decide(flags), "flags": flags}
