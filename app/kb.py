@@ -48,11 +48,17 @@ def make_chunks(secs) -> List[Dict[str, str]]:
 
 
 # ---------- BM25 (한국어 형태소 분석기 없이: 한글은 음절 2-gram, 영문·숫자는 단어) ----------
-_TOKEN_RE = re.compile(r"[가-힣]+|[a-zA-Z_][a-zA-Z_0-9]*|\d+(?:\.\d+)?")
+# 연산자 기호(!=, <=, >=, ==, //, **, %)도 토큰으로 둔다. 표 CSV에만 나오는 기호를 묻는 질문("!=는 뭐예요?")이
+# 기호가 버려져 엉뚱한 섹션으로 가던 문제(DEVLOG 26장). 일반 기호(<, >, *, 따옴표 등)는 노이즈라 넣지 않는다.
+_TOKEN_RE = re.compile(r"[가-힣]+|[a-zA-Z_][a-zA-Z_0-9]*|\d+(?:\.\d+)?|!=|<=|>=|==|//|\*\*|%")
+
+
+_BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
 
 
 def tokenize(text: str) -> List[str]:
     toks = []
+    text = _BOLD_RE.sub(r"\1", text)  # 마크다운 굵게(**강조**)는 거듭제곱 기호 `**`와 구별해 벗긴다
     for w in _TOKEN_RE.findall(text.lower()):
         if "가" <= w[0] <= "힣":
             if len(w) == 1:

@@ -8,6 +8,7 @@ LLM은 예/아니오 신호 9개만 뽑고(app/classify_feat.py), 범주는 코�
 """
 import asyncio
 import os
+import re
 import time
 from typing import Dict, List
 
@@ -17,8 +18,19 @@ from .llm import chat_json, log
 EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")  # minimal보다 block F1 약 +4%p(DEVLOG 1장)
 VOTES = int(os.environ.get("CLASSIFY_VOTES", "3"))  # 3회 다수결: block F1 0.902→0.922, 흔들림 감소(DEVLOG 5장)
 EXTRA_VOTES = int(os.environ.get("CLASSIFY_EXTRA_VOTES", "2"))  # 적응형 투표: 첫 VOTES표가 갈리면 추가로 받는 표 수(0=끔)
+SUBMIT_RULE = os.environ.get("SUBMIT_RULE", "1") == "1"  # 대필 표현 보강(DEVLOG 27장). 0이면 끔
 MAX_TOKENS = 2000  # 운영 API: 비스트리밍 응답은 2000 이하
 TIMEOUT = 20
+
+
+# 프롬프트 6번(submit_work) 정의를 코드로 한 번 더 확인한다: 평가·숙제에 "낼/넣을/제출할" 것을 만들어 달라는 표현,
+# 또는 완성 보고서·답안 전체·처음부터 끝까지 써 달라는 표현. 작은 모델이 "소설", "거절하지 말고" 같은 말에
+# 가려 표결에서 놓치는 경우만 보탠다(공격 신호 OR 추가이므로 다른 범주는 바뀌지 않음).
+_SUBMIT_RE = re.compile(
+    r"(수행평가|숙제|과제|시험|보고서|답안)\S*\s*(에|으로|용으로|로)?\s*(낼|넣을|제출할|제출용|쓸|내려는)"
+    r"|완성\s*(report|보고서|코드|답안)|답안\s*전체|보고서\s*전체|(처음|첨)부터\s*끝까지|for submission",
+    re.I,
+)
 
 
 def render(messages: List[Dict[str, str]]) -> str:
@@ -45,6 +57,10 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
         if EXTRA_VOTES and split and (deadline is None or deadline - time.time() > 8):
             outs += [o for o in await calls(EXTRA_VOTES) if isinstance(o, dict)]
         flags = {k: sum(o.get(k) is True for o in outs) * 2 > len(outs) for k in classify_feat.FLAGS}
+        if SUBMIT_RULE and not flags.get("submit_work"):
+            last = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+            if _SUBMIT_RE.search(last):
+                flags["submit_work"] = True
         return {**classify_feat.decide(flags), "flags": flags}
     except Exception as e:  # noqa: BLE001
         log("classify_error", err=type(e).__name__)
