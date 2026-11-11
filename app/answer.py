@@ -48,7 +48,7 @@ async def grounded_answer(messages, sections: List[Dict[str, str]], mode: str = 
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
     system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""))
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n마지막 학습자 발화에 답하세요."
-    out = await chat_json(system, user, effort=ANSWER_EFFORT, max_tokens=2000, timeout=20, deadline=deadline)
+    out = await chat_json(system, user, effort=ANSWER_EFFORT, max_tokens=2000, timeout=20, deadline=deadline, hedge_after=9.0)
     ids = {s["id"] for s in sections}
     ev = out.get("evidence")
     found = out.get("found") is True and ev in ids

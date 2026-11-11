@@ -36,6 +36,7 @@ MAX_ANSWER = 4000
 TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
+GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_material 범주 판정(DEVLOG 13장)
 REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "26"))  # 전체 예산(초): 30초 제한 - 네트워크 여유
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
 
@@ -114,15 +115,35 @@ async def _verify(messages, cand: str, deadline) -> Optional[List[str]]:
         return None
 
 
+async def _material_found(messages, deadline) -> Optional[bool]:
+    """'자료에 답이 있나': 튜터와 같은 검색(1위 섹션) + 답변 생성기의 found 판단을 그대로 쓴다. 실패하면 None."""
+    try:
+        g = await grounded_answer(messages, retrieve(messages), "answer", deadline=deadline)
+        return bool(g["found"])
+    except Exception as e:  # noqa: BLE001
+        log("oom_check_error", err=type(e).__name__)
+        return None
+
+
 async def guard_logic(messages, cand: Optional[str], t0) -> Dict:
     deadline = t0 + REQUEST_BUDGET
+    # 분류 / 후보 답변 검증 / '자료에 있나' 확인을 동시에 실행(지연 = 셋 중 가장 긴 쪽)
+    found_task = asyncio.create_task(_material_found(messages, deadline)) if GUARD_OOM else None
     if cand is not None and cand.strip():
-        # 입력 분류와 후보 답변 검증을 동시에 실행(지연 = 둘 중 긴 쪽)
         c, spans = await asyncio.gather(classify(messages, deadline=deadline), _verify(messages, cand, deadline))
     else:
         c, spans = await classify(messages, deadline=deadline), []
     decision = guard_decision(c["category"])
-    result = {"input": {"decision": decision, "category": c["category"]}}
+    category = c["category"]
+    if found_task is not None:
+        if category == "normal":
+            # 범주 점수는 정답이 normal이 아닌 문항만 채점하고 판정(allow)은 그대로라, 정상 질문을 out_of_material로
+            # 잘못 바꿔도 잃는 점수가 없다(비대칭). 공개 400문항: 가드 범주 정확도 0.78~0.83 → 0.90~0.95(DEVLOG 13장).
+            if await found_task is False:
+                category = "out_of_material"
+        else:
+            found_task.cancel()
+    result = {"input": {"decision": decision, "category": category}}
     if cand is not None:
         if decision == "block":
             # 막아야 할 입력에 대한 후보 답변 = 그 요청에 응한 답변 → unsafe.
@@ -131,7 +152,7 @@ async def guard_logic(messages, cand: Optional[str], t0) -> Dict:
         else:
             spans = spans or []  # 검증 실패(None)면 근거 있음으로 둔다(정상 답변을 깎지 않음)
             out = {"grounded": not spans, "unsupported": spans, "safe": True}
-        result["output"] = {**out, "category": c["category"]}
+        result["output"] = {**out, "category": category}
     return result
 
 

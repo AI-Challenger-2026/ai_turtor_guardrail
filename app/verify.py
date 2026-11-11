@@ -68,7 +68,7 @@ def render(messages: List[Dict[str, str]]) -> str:
 async def find_unsupported(messages, candidate: str, sections: List[Dict[str, str]], deadline=None) -> List[str]:
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n[후보 답변]\n{candidate}"
-    out = await chat_json(SYSTEM, user, effort="low", max_tokens=2000, timeout=20, deadline=deadline)
+    out = await chat_json(SYSTEM, user, effort="low", max_tokens=2000, timeout=20, deadline=deadline, hedge_after=9.0)
     spans = []
     for c in out.get("claims") or []:
         if not isinstance(c, dict) or c.get("verdict") not in ("contradict", "absent"):

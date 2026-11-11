@@ -34,9 +34,45 @@ async def _once(kwargs, timeout: float) -> str:
     return (r.choices[0].message.content or "").strip()
 
 
+def _valid(text: str, json_mode: bool) -> str:
+    if not text:
+        raise ValueError("empty completion")
+    if json_mode:
+        json.loads(text)
+    return text
+
+
+async def _hedged(kwargs, t: float, hedge_after: Optional[float], json_mode: bool) -> str:
+    """헤지 요청: hedge_after초 안에 안 끝나면 같은 요청을 하나 더 보내 먼저 성공한 쪽을 쓴다.
+    API가 가끔 응답 없이 멈추는 경우(실제 채점에서 26초 대체 발생)의 꼬리 지연을 줄인다."""
+    async def attempt(tt):
+        return _valid(await _once(kwargs, tt), json_mode)
+
+    first = asyncio.create_task(attempt(t))
+    if not hedge_after or t - hedge_after < MIN_ATTEMPT:
+        return await first
+    done, _ = await asyncio.wait({first}, timeout=hedge_after)
+    if first in done and first.exception() is None:
+        return first.result()
+    tasks = {first} if first not in done else set()
+    tasks.add(asyncio.create_task(attempt(t - hedge_after)))
+    last: BaseException = first.exception() if first in done else RuntimeError("hedge")
+    try:
+        while tasks:
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                if d.exception() is None:
+                    return d.result()
+                last = d.exception()
+        raise last
+    finally:
+        for x in tasks:
+            x.cancel()
+
+
 async def chat(system: str, user: str, *, effort: str = "minimal", max_tokens: int = 2000,
                timeout: float = 20, json_mode: bool = False, retries: int = 1,
-               deadline: Optional[float] = None) -> str:
+               deadline: Optional[float] = None, hedge_after: Optional[float] = None) -> str:
     """LLM을 호출해 텍스트(json_mode면 파싱 가능한 JSON 텍스트)를 돌려준다.
     빈 응답·JSON 파싱 실패·오류는 deadline 안에서 retries만큼 다시 시도한다."""
     kwargs = dict(
@@ -55,12 +91,7 @@ async def chat(system: str, user: str, *, effort: str = "minimal", max_tokens: i
             if t < MIN_ATTEMPT:
                 raise DeadlineExceeded() from last
         try:
-            text = await _once(kwargs, t)
-            if not text:
-                raise ValueError("empty completion")
-            if json_mode:
-                json.loads(text)
-            return text
+            return await _hedged(kwargs, t, hedge_after, json_mode)
         except Exception as e:  # noqa: BLE001
             last = e
     raise last
