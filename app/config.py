@@ -31,6 +31,8 @@ GENERATE_EFFORT = "low"
 GENERATE_MAX_TOKENS = 2000
 # One retry if the JSON is invalid; each attempt is capped by the remaining request budget.
 GENERATE_RETRIES = 1
+# Time kept back from generation so the fallback can still answer inside the request deadline.
+GENERATE_RESERVE_S = 0.5
 
 # Embeddings: EMBEDDING_* environment only. If any setting is missing, retrieval is BM25 only.
 EMBED_MODEL = os.environ.get("EMBEDDING_MODEL", "")

@@ -193,10 +193,20 @@ async def _tutor(req: TutorRequest, deadline: Deadline, info: dict):
             # Fixed text only; learner input is never interpolated.
             return TutorResponse(answer=route.template, action=route.action).model_dump(), "ok"
         hits = await retrieving
-        gen = await generate.generate_tutor(req.messages, verdict, hits, mode=route.mode, deadline=deadline)
+        try:
+            # Stops before the request deadline, so a slow call still leaves time for the fallback below.
+            gen = await asyncio.wait_for(
+                generate.generate_tutor(req.messages, verdict, hits, mode=route.mode, deadline=deadline),
+                timeout=max(0.1, deadline.remaining() - config.GENERATE_RESERVE_S))
+        except asyncio.TimeoutError:
+            gen = None
         if gen is None:
             if route.fallback is not None:
                 return TutorResponse(answer=route.fallback, action=route.action).model_dump(), "fallback_generate"
+            material = generate.from_material(req.messages, verdict, hits)
+            if material is not None:
+                return TutorResponse(answer=material.answer, action=route.action,
+                                     citations=material.citations).model_dump(), "fallback_generate"
             return tutor_fallback(), "fallback_generate"
         action = route.action if gen.found else "abstain"
         return TutorResponse(answer=gen.answer, action=action, citations=gen.citations).model_dump(), "ok"

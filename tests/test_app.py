@@ -204,7 +204,8 @@ class TutorTests(Base):
         r = self.post("/tutor", {"spec_version": "1.0", "session_id": "s_1", "messages": msgs})
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(data, {"answer": f"답변입니다 {MARKER}", "action": "answer", "citations": ["FIN-02-04"]})
+        self.assertTrue(data["answer"].startswith(f"답변입니다 {MARKER}\n\n{templates.MATERIAL_EXCERPT_HEAD} "))
+        self.assertEqual((data["action"], data["citations"]), ("answer", ["FIN-02-04"]))
         self.assertIsNotNone(scoring.parse_tutor(data))
         self.assertEqual(len(self.fake.json_calls()), 1)
         call = self.fake.gen_calls()[0]
@@ -245,20 +246,23 @@ class TutorTests(Base):
     def test_llm_error_falls_back(self):
         self.fake.script = [("raise", RuntimeError(f"boom {MARKER}"))] * 2
         r = self.post("/tutor", {"messages": chat(f"질문 {MARKER}")})
-        self.assertEqual(r.json(), {"answer": templates.FALLBACK, "action": "answer", "citations": []})
+        data = r.json()
+        self.assertTrue(data["answer"].startswith(templates.FALLBACK_FROM_MATERIAL))
+        self.assertNotIn(MARKER, data["answer"])
+        self.assertEqual((data["action"], len(data["citations"])), ("answer", 1))
         self.assertTrue(any("event=llm" in l and "error=RuntimeError" in l for l in self.cap.lines))
         self.assertTrue(any("outcome=fallback_generate" in l for l in self.request_lines()))
 
     def test_empty_completion_falls_back(self):
         self.fake.script = [("text", "   ")] * 2
         r = self.post("/tutor", {"messages": chat("질문")})
-        self.assertEqual(r.json()["answer"], templates.FALLBACK)
+        self.assertTrue(r.json()["answer"].startswith(templates.FALLBACK_FROM_MATERIAL))
         self.assertTrue(any("error=EmptyCompletion" in l for l in self.cap.lines))
 
     def test_token_limit_is_logged_as_truncated(self):
         self.fake.script = [("truncated", '{"found": true, "answer": "가'), ("truncated", "")]
         r = self.post("/tutor", {"messages": chat("질문")})
-        self.assertEqual(r.json()["answer"], templates.FALLBACK)
+        self.assertTrue(r.json()["answer"].startswith(templates.FALLBACK_FROM_MATERIAL))
         self.assertTrue(any("error=TruncatedCompletion" in l for l in self.cap.lines))
 
     def test_answer_is_capped_at_4000_chars(self):
@@ -274,8 +278,10 @@ class TutorTests(Base):
             r = self.post("/tutor", {"messages": chat(f"질문 {MARKER}")})
             elapsed = time.perf_counter() - t0
         self.assertLess(elapsed, 2.5)
-        self.assertEqual(r.json(), {"answer": templates.FALLBACK, "action": "answer", "citations": []})
-        self.assertTrue(any("outcome=fallback_deadline" in l for l in self.request_lines()))
+        data = r.json()
+        self.assertTrue(data["answer"].startswith(templates.FALLBACK_FROM_MATERIAL))
+        self.assertEqual((data["action"], len(data["citations"])), ("answer", 1))
+        self.assertTrue(any("outcome=fallback_generate" in l for l in self.request_lines()))
         self.assertTrue(any("event=llm" in l and "status=cancelled" in l for l in self.cap.lines))
 
     def test_exception_inside_route_is_contained(self):

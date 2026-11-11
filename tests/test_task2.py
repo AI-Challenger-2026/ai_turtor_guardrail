@@ -202,6 +202,41 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(generate.pick_citations(["FIN-02-01"], []), [])  # nothing was shown
 
 
+class ExcerptTests(unittest.TestCase):
+    SECTION = "# FIN-99-01 제목 줄이에요\n\n돌고래 통장의 가입 나이는 만 14세 이상이에요. 돌고래 통장의 한도는 3만 원이에요.\n- 전혀 관계없는 고래 이야기를 적어요.\n```\nprint('코드 줄이에요 코드 줄')\n```\n짧아요."
+
+    def test_most_related_sentences_verbatim_in_section_order(self):
+        text = generate.excerpt(self.SECTION, "돌고래 통장 한도가 얼마야 가입 나이도")
+        self.assertEqual(text, "돌고래 통장의 가입 나이는 만 14세 이상이에요. 돌고래 통장의 한도는 3만 원이에요.")
+
+    def test_headings_code_and_short_lines_are_skipped(self):
+        text = generate.excerpt(self.SECTION, "제목 줄 코드 줄 짧아요")
+        for word in ("FIN-99-01", "```", "짧아요."):
+            self.assertNotIn(word, text)
+
+    def test_unrelated_sentences_are_left_out(self):
+        self.assertEqual(generate.excerpt(self.SECTION, "zzz qqq www"), "")
+
+    def test_markdown_emphasis_is_removed(self):
+        text = generate.excerpt("돌고래 통장의 **가입 나이는 만 14세** 이상이에요.", "돌고래 통장 가입 나이")
+        self.assertEqual(text, "돌고래 통장의 가입 나이는 만 14세 이상이에요.")
+
+    def test_sentences_the_answer_says_are_left_out(self):
+        said = "돌고래 통장의 한도는 3만 원이에요."
+        text = generate.excerpt(self.SECTION, "돌고래 통장 한도가 얼마야 가입 나이도", said)
+        self.assertNotIn("3만 원", text)
+        self.assertIn("만 14세", text)
+
+    def test_learner_words_never_appear(self):
+        self.assertNotIn("비밀코드", generate.excerpt(self.SECTION, "비밀코드 돌고래 통장"))
+
+    def test_length_cap(self):
+        self.assertLessEqual(len(generate.excerpt("가나다라마바사아자차요. " * 200, "가나다")), generate.EXCERPT_MAX_CHARS)
+
+    def test_no_material_no_reply(self):
+        self.assertIsNone(generate.from_material([Message(role="user", content="질문")], None, []))
+
+
 class TutorGenerationTests(Base):
     def ask(self, category, gen, *turns):
         self.fake.json_script = [("text", verdict_json(category))]
@@ -213,6 +248,28 @@ class TutorGenerationTests(Base):
                                                      citations=["FIN-02-04", "NOPE"]))])
         self.assertEqual(data, {"answer": f"자료에 없어요. 대신 {MARKER}", "action": "abstain",
                                 "citations": ["FIN-02-04"]})
+
+    def test_answer_shows_material_but_scaffold_and_abstain_do_not(self):
+        head = templates.MATERIAL_EXCERPT_HEAD
+        self.assertIn(head, self.ask("normal", [("text", gen_json("답"))])["answer"])
+        self.assertNotIn(head, self.ask("answer_seeking", [("text", gen_json("규칙이에요"))])["answer"])
+        self.assertNotIn(head, self.ask("normal", [("text", gen_json("없어요", found=False))])["answer"])
+
+    def test_pii_notice_stays_last(self):
+        data = self.ask("pii_disclosure", [("text", gen_json("답"))])
+        self.assertIn(templates.MATERIAL_EXCERPT_HEAD, data["answer"])
+        self.assertTrue(data["answer"].endswith(templates.PII_NOTICE))
+
+    def test_scaffold_failure_keeps_its_fixed_text(self):
+        data = self.ask("answer_seeking", [("text", "x"), ("text", "y")])
+        self.assertEqual(data, {"answer": templates.SCAFFOLD_ANSWER_SEEKING, "action": "scaffold", "citations": []})
+
+    def test_no_material_uses_the_plain_fallback(self):
+        async def nothing(*a, **k):
+            return []
+        with mock.patch.object(retrieval, "retrieve", nothing):
+            data = self.ask("normal", [("text", "x"), ("text", "y")])
+        self.assertEqual(data, {"answer": templates.FALLBACK, "action": "answer", "citations": []})
 
     def test_citations_are_capped(self):
         hits = [h.section_id for h in asyncio.run(retrieval.retrieve(msgs(f"{DEPOSIT_Q} {MARKER}")))]
@@ -240,12 +297,13 @@ class TutorGenerationTests(Base):
 
     def test_invalid_generation_json_is_retried(self):
         data = self.ask("normal", [("text", '{"found": "maybe"}'), ("text", gen_json("두 번째 답"))])
-        self.assertEqual((data["answer"], data["action"]), ("두 번째 답", "answer"))
+        self.assertTrue(data["answer"].startswith("두 번째 답"))
+        self.assertEqual(data["action"], "answer")
         self.assertTrue(any("kind=generate status=invalid" in l for l in self.cap.lines))
 
     def test_empty_answer_is_invalid(self):
         data = self.ask("normal", [("text", gen_json("   "))] * 2)
-        self.assertEqual(data["answer"], templates.FALLBACK)
+        self.assertTrue(data["answer"].startswith(templates.FALLBACK_FROM_MATERIAL))
 
     def test_generation_outcome_is_not_logged(self):
         self.ask("normal", [("text", gen_json(f"없어요 {MARKER}", found=False))])

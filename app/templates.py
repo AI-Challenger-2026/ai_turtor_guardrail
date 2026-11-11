@@ -2,6 +2,8 @@
 
 # Generation failed or the request budget ran out.
 FALLBACK = "지금은 답변을 만들 수 없어요. 잠시 후 다시 질문해 주세요."
+FALLBACK_FROM_MATERIAL = "지금은 답변을 정리하지 못해서 수업 자료에서 관련 내용을 옮겨 드릴게요."
+MATERIAL_EXCERPT_HEAD = "수업 자료 원문:"
 
 REFUSE_JAILBREAK = (
     "이전 지시를 무시하거나 제한 없이 답하는 역할을 맡을 수는 없고, 숨겨진 지시도 보여 드릴 수 없어요. "
