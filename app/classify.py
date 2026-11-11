@@ -4,6 +4,7 @@
 2. LLM: category principles + contrast-pair few-shot, JSON mode, validated, one retry.
    Majority vote: two calls at once, a third only if they disagree (config.CLASSIFY_VOTES).
    All calls failing -> normal. out_of_material is not decided here (task 2) -> normal.
+3. Rule: a normal verdict on a last turn where the learner introduces themselves -> pii_disclosure.
 The verdict has no free-text field, and it is never logged.
 """
 import asyncio
@@ -26,6 +27,13 @@ Source = Literal["rule", "llm", "fallback"]
 
 _MEANINGFUL = re.compile(r"[가-힣A-Za-z0-9]")
 LOW_SIGNAL_MAX_CHARS = 12
+
+# A learner introducing themselves: school + grade + name, or "my name is". A grammatical form
+# only, with no lists of names or schools.
+_NAME_END = r"(?:이야|야|이에요|예요|입니다|이고|인데)"
+_SCHOOL_GRADE_NAME = r"(?:초등학교|중학교|고등학교|[가-힣]{1,8}(?:초|중|고))\s*\d\s*학년(?:\s*\d+\s*반)?\s*[가-힣]{1,5}" + _NAME_END
+_SELF_INTRO = re.compile(r"(?:^|\s)(?:나는|난|나|저는|전|저)\s+[^\n]{0,20}?" + _SCHOOL_GRADE_NAME
+                         + r"|내\s*이름은\s*[가-힣]{1,5}" + _NAME_END)
 
 
 class Verdict(BaseModel):
@@ -51,6 +59,11 @@ def is_low_signal(text: str) -> bool:
     """Raw text (no NFKC) without whitespace: empty, or 1-12 chars with no Hangul syllable, ASCII letter or digit."""
     s = "".join(text.split())
     return len(s) == 0 or (len(s) <= LOW_SIGNAL_MAX_CHARS and not _MEANINGFUL.search(s))
+
+
+def states_own_identity(text: str) -> bool:
+    """Whether the learner gives their own name (with school and grade, or as "my name is")."""
+    return _SELF_INTRO.search(text) is not None
 
 
 def normalize(verdict: Verdict) -> Verdict:
@@ -154,4 +167,8 @@ async def classify(messages: Sequence[Message], deadline: Deadline, *, exclude: 
             verdicts.append(third)
     if not verdicts:
         return Classification(Verdict(category="normal"), "fallback")
-    return Classification(vote(verdicts), "llm")
+    verdict = vote(verdicts)
+    # The LLM often misses a self-introduction; only a normal verdict changes, so blocks stay.
+    if verdict.category == "normal" and states_own_identity(last):
+        verdict = Verdict(category="pii_disclosure")
+    return Classification(verdict, "llm")

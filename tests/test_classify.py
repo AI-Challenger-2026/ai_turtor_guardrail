@@ -273,6 +273,58 @@ class VotingSettingTests(unittest.TestCase):
         self.assertEqual(classify.config.CLASSIFY_VOTES, 3)
 
 
+class SelfIntroFormTests(unittest.TestCase):
+    def test_self_introductions(self):
+        for text in ("나는 푸른 중학교 2학년 하늘이야. 적금 이자율이 궁금해", "난 푸른중 1학년 별이야 이체 한도 알려 줘",
+                     "나 푸른 중학교 3학년 2반 하늘인데 질문 있어", "저는 푸른고등학교 1학년 하늘입니다.",
+                     "질문 있어\n나는 푸른 초등학교 6학년 별이야", "내 이름은 하늘이야 보고서 순서 알려 줘", "내이름은 별이에요"):
+            with self.subTest(text=text):
+                self.assertTrue(classify.states_own_identity(text))
+
+    def test_other_sentences(self):
+        for text in ("이건 중학교 2학년 수학이야", "나는 학생이야", "나는 하늘이야 질문 있어", "중학교 2학년 때 배웠어",
+                     "그 친구 이름은 뭐야", "다람쥐 통장의 최소 금액은 얼마야", ""):
+            with self.subTest(text=text):
+                self.assertFalse(classify.states_own_identity(text))
+
+
+class SelfIntroVerdictTests(Base):
+    """A self-introduction turns a normal verdict into pii_disclosure and changes nothing else."""
+    INTRO = "나는 푸른 중학교 2학년 하늘이야. 다람쥐 통장의 최소 금액은 얼마야"
+
+    def run_classify(self, *turns):
+        return asyncio.run(classify.classify([Message(**m) for m in chat(*turns)], Deadline(25)))
+
+    def test_normal_becomes_pii(self):
+        self.fake.json_script = [("text", verdict_json("normal"))]
+        result = self.run_classify(self.INTRO)
+        self.assertEqual((result.verdict.category, result.source), ("pii_disclosure", "llm"))
+
+    def test_other_verdicts_stay(self):
+        for category in ("jailbreak_injection", "academic_dishonesty", "off_topic", "answer_seeking", "emotional_distress"):
+            with self.subTest(category=category):
+                self.fake.json_script = [("text", verdict_json(category))]
+                self.assertEqual(self.run_classify(self.INTRO).verdict.category, category)
+
+    def test_only_the_last_turn_counts(self):
+        self.fake.json_script = [("text", verdict_json("normal"))]
+        self.assertEqual(self.run_classify(self.INTRO, "답변이에요", "다람쥐 통장은 뭐야").verdict.category, "normal")
+
+    def test_failed_calls_stay_normal(self):
+        self.fake.json_script = [("text", "x"), ("text", "y")]
+        result = self.run_classify(self.INTRO)
+        self.assertEqual((result.verdict.category, result.source), ("normal", "fallback"))
+
+    def test_routes(self):
+        self.fake.json_script = [("text", verdict_json("normal"))]
+        data = self.post("/guard", {"messages": chat(self.INTRO)}).json()
+        self.assertEqual(data["input"], {"decision": "allow", "category": "pii_disclosure"})
+        self.fake.json_script = [("text", verdict_json("normal"))]
+        data = self.post("/tutor", {"messages": chat(self.INTRO)}).json()
+        self.assertEqual(data["action"], "answer")
+        self.assertTrue(data["answer"].endswith(EXPECTED_TEXTS["PII_NOTICE"]))
+
+
 class VotingTests(Base):
     """Majority vote: two calls at once, a third only when they disagree."""
 
