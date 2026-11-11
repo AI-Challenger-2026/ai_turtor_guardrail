@@ -37,7 +37,6 @@ MAX_ANSWER = 4000
 TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
-FOUND_SAMPLES = int(os.environ.get("FOUND_SAMPLES", "2"))  # 튜터 답변 생성 동시 표본 수(18장)
 OFFTOPIC_RECHECK = os.environ.get("OFFTOPIC_RECHECK", "1") == "1"  # off_topic인데 자료에 답이 있으면 정상으로(17장)
 EXTRACTIVE_FALLBACK = os.environ.get("EXTRACTIVE_FALLBACK", "1") == "1"  # 생성 실패 시 자료 발췌 답변(16장)
 SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 튜터: 분류와 답변 생성 동시 시작
@@ -100,10 +99,6 @@ async def tutor_logic(messages, t0) -> Dict:
     deadline = t0 + REQUEST_BUDGET
     secs = retrieve(messages)
     gen_task = asyncio.create_task(_generate(messages, secs, "answer", deadline)) if SPECULATIVE else None
-    # 두 번째 생성을 동시에 돌린다: 첫 번째가 '자료에 없음'이라 해도 두 번째가 답을 찾으면 그 답을 쓴다.
-    # 공개 131문항 × 3회: found가 흔들리는 문항은 정상 12 : 자료 없음 4(정상이 5배 많음). '둘 중 하나라도 있음' 규칙이
-    # 정상 107→110, 자료 없음 16→14로 가장 높았다(DEVLOG 18장).
-    gen_task2 = asyncio.create_task(_generate(messages, secs, "answer", deadline)) if SPECULATIVE and FOUND_SAMPLES >= 2 else None
     c = await classify(messages, deadline=min(deadline, t0 + CLASSIFY_BUDGET))
     if OFFTOPIC_RECHECK and c["category"] == "off_topic" and gen_task is not None:
         # off_topic(수업과 무관)인데 생성기가 자료에서 답을 찾았다면 모순 → 정상 질문으로 본다.
@@ -115,14 +110,12 @@ async def tutor_logic(messages, t0) -> Dict:
     citations: List[str] = []
     fixed = template_for(c["category"], c["harmful_type"])
     if fixed is not None:
-        for t in (gen_task, gen_task2):
-            if t:
-                t.cancel()
+        if gen_task:
+            gen_task.cancel()
         return {"answer": fixed[:MAX_ANSWER], "action": action, "citations": citations}
     if action == "scaffold" or gen_task is None:
-        for t in (gen_task, gen_task2):
-            if t:
-                t.cancel()
+        if gen_task:
+            gen_task.cancel()
         if action == "scaffold":
             mode = "academic" if c["category"] == "academic_dishonesty" else "scaffold"
         else:
@@ -130,13 +123,6 @@ async def tutor_logic(messages, t0) -> Dict:
         g = await _generate(messages, secs, mode, deadline)
     else:
         g = await gen_task
-        if gen_task2 is not None:
-            if g is not None and g["found"]:
-                gen_task2.cancel()
-            else:
-                g2 = await gen_task2
-                if g2 is not None and (g is None or g2["found"]):
-                    g = g2
     if g is None:
         # 답변 생성 실패·시간 초과: 기본 응답 대신 1위 섹션 발췌 + 인용(대필 모드는 발췌가 '대신 써 주기'가 될 수 있어 제외)
         if c["category"] == "academic_dishonesty" and EXTRACTIVE_FALLBACK:
