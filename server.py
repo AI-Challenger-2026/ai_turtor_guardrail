@@ -37,6 +37,7 @@ MAX_ANSWER = 4000
 TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
+OFFTOPIC_RECHECK = os.environ.get("OFFTOPIC_RECHECK", "1") == "1"  # off_topic인데 자료에 답이 있으면 정상으로(17장)
 EXTRACTIVE_FALLBACK = os.environ.get("EXTRACTIVE_FALLBACK", "1") == "1"  # 생성 실패 시 자료 발췌 답변(16장)
 SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 튜터: 분류와 답변 생성 동시 시작
 GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_material 범주 판정(DEVLOG 13장)
@@ -78,6 +79,9 @@ def retrieve(messages) -> List[Dict[str, str]]:
 
 
 PII_NOTE = "이름이나 학교 같은 개인정보는 채팅에 적지 않아도 괜찮아요."
+# 대필 요청인데 생성이 시간 초과된 경우의 대체 문구(발췌는 '대신 써 주기'가 될 수 있어 쓰지 않음)
+ACADEMIC_FALLBACK = ("평가나 숙제에 제출할 답안은 대신 써 줄 수 없어요. 문제에서 무엇을 요구하는지 한 문장으로 적고, "
+                     "관련 실습 코드를 다시 실행해 보며 각 줄이 무엇을 하는지 스스로 정리해 보세요. 직접 쓴 답을 보여 주면 힌트를 줄게요.")
 
 
 async def _generate(messages, secs, mode, deadline):
@@ -96,6 +100,12 @@ async def tutor_logic(messages, t0) -> Dict:
     secs = retrieve(messages)
     gen_task = asyncio.create_task(_generate(messages, secs, "answer", deadline)) if SPECULATIVE else None
     c = await classify(messages, deadline=min(deadline, t0 + CLASSIFY_BUDGET))
+    if OFFTOPIC_RECHECK and c["category"] == "off_topic" and gen_task is not None:
+        # off_topic(수업과 무관)인데 생성기가 자료에서 답을 찾았다면 모순 → 정상 질문으로 본다.
+        # 공개 400문항 2회: off_topic+found에서 정상 6 : 진짜 off_topic 2. jailbreak·harmful은 반대라 적용하지 않음(DEVLOG 17장).
+        g0 = await gen_task
+        if g0 is not None and g0["found"]:
+            c = {**c, "category": "normal"}
     action = tutor_action(c["category"], c["harmful_type"])
     citations: List[str] = []
     fixed = template_for(c["category"], c["harmful_type"])
@@ -115,8 +125,10 @@ async def tutor_logic(messages, t0) -> Dict:
         g = await gen_task
     if g is None:
         # 답변 생성 실패·시간 초과: 기본 응답 대신 1위 섹션 발췌 + 인용(대필 모드는 발췌가 '대신 써 주기'가 될 수 있어 제외)
-        mode_now = "academic" if c["category"] == "academic_dishonesty" else ""
-        ext = "" if mode_now == "academic" or not EXTRACTIVE_FALLBACK else extractive_answer(messages, secs[0])
+        if c["category"] == "academic_dishonesty" and EXTRACTIVE_FALLBACK:
+            return {"answer": ACADEMIC_FALLBACK, "action": action, "citations": citations}
+        # 분류가 실패해 normal로 대체된 경우(flags 없음)에는 공격 요청일 수 있으므로 발췌하지 않고 기본 응답을 쓴다
+        ext = extractive_answer(messages, secs[0]) if EXTRACTIVE_FALLBACK and "flags" in c else ""
         if ext:
             log("tutor_extractive_fallback")
             return {"answer": ext[:MAX_ANSWER], "action": action, "citations": [secs[0]["id"]]}
@@ -165,13 +177,16 @@ async def guard_logic(messages, cand: Optional[str], t0) -> Dict:
         c, spans = await asyncio.gather(classify(messages, deadline=deadline), _verify(messages, cand, deadline))
     else:
         c, spans = await classify(messages, deadline=deadline), []
-    decision = guard_decision(c["category"])
     category = c["category"]
+    if OFFTOPIC_RECHECK and category == "off_topic" and found_task is not None:
+        if await found_task is True:  # off_topic인데 자료에 답이 있으면 정상으로(튜터와 같은 규칙, DEVLOG 17장)
+            category = "normal"
+    decision = guard_decision(category)
     if GUARD_OOM and GUARD_OOM_MODE != "parallel" and category == "normal":
         if await _material_found(messages, deadline) is False:
             category = "out_of_material"
     if found_task is not None:
-        if category == "normal":
+        if category == "normal" and not found_task.cancelled():
             # 범주 점수는 정답이 normal이 아닌 문항만 채점하고 판정(allow)은 그대로라, 정상 질문을 out_of_material로
             # 잘못 바꿔도 잃는 점수가 없다(비대칭). 공개 400문항: 가드 범주 정확도 0.78~0.83 → 0.90~0.95(DEVLOG 13장).
             if await found_task is False:

@@ -27,10 +27,10 @@ def extractive_answer(messages: List[Dict[str, str]], section: Dict[str, str], m
     users = [m.get("content", "") for m in messages if m.get("role") == "user"]
     q = set(tokenize(users[-1] if users else ""))
     sents = _sentences(section.get("text", ""))
-    if not q or not sents:
+    if not sents:
         return ""
     scored = sorted(range(len(sents)), key=lambda i: -len(q & set(tokenize(sents[i]))))
     best = [i for i in scored[:max_sents] if len(q & set(tokenize(sents[i]))) > 0]
     if not best:
-        return ""
+        best = list(range(min(max_sents, len(sents))))  # 겹치는 문장이 없으면 섹션 앞 문장(인용 점수라도 건짐)
     return " ".join(sents[i] for i in sorted(best))
