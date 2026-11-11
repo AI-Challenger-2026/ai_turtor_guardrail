@@ -37,6 +37,7 @@ TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
 GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_material 범주 판정(DEVLOG 13장)
+GUARD_OOM_MODE = os.environ.get("GUARD_OOM_MODE", "parallel")  # "parallel": 처음부터 동시 실행(기본) | "after": 분류가 normal일 때만 뒤이어 확인(가드 지연 증가로 기각)
 REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "26"))  # 전체 예산(초): 30초 제한 - 네트워크 여유
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
 
@@ -128,13 +129,16 @@ async def _material_found(messages, deadline) -> Optional[bool]:
 async def guard_logic(messages, cand: Optional[str], t0) -> Dict:
     deadline = t0 + REQUEST_BUDGET
     # 분류 / 후보 답변 검증 / '자료에 있나' 확인을 동시에 실행(지연 = 셋 중 가장 긴 쪽)
-    found_task = asyncio.create_task(_material_found(messages, deadline)) if GUARD_OOM else None
+    found_task = asyncio.create_task(_material_found(messages, deadline)) if GUARD_OOM and GUARD_OOM_MODE == "parallel" else None
     if cand is not None and cand.strip():
         c, spans = await asyncio.gather(classify(messages, deadline=deadline), _verify(messages, cand, deadline))
     else:
         c, spans = await classify(messages, deadline=deadline), []
     decision = guard_decision(c["category"])
     category = c["category"]
+    if GUARD_OOM and GUARD_OOM_MODE != "parallel" and category == "normal":
+        if await _material_found(messages, deadline) is False:
+            category = "out_of_material"
     if found_task is not None:
         if category == "normal":
             # 범주 점수는 정답이 normal이 아닌 문항만 채점하고 판정(allow)은 그대로라, 정상 질문을 out_of_material로
