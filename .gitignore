@@ -1,3 +1,6 @@
 .env
-.env
+submission.json
+logs/
 __pycache__/
+*.pyc
+.cache/
