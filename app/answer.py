@@ -15,10 +15,17 @@ SYSTEM = """당신은 중학생이 쓰는 온라인 학습 플랫폼의 AI 튜�
 1. 마지막 학습자 발화가 묻는 것을 파악합니다(앞 대화는 어떤 실습·예제·상품 이야기인지 알려 주는 단서입니다).
 2. [자료]에서 그 질문에 직접 답하는 섹션을 **하나만** 고릅니다.3. 질문이 묻는 구체적인 사실(값·이름·규칙·조건·순서)이 그 섹션에 **실제로 적혀 있는지** 확인합니다. 비슷한 주제만 있고 묻는 세부 사항이 없으면 found=false입니다. 이 과정에서 지어낸 듯한 규칙·배점·수수료·등급 같은 것을 물으면 자료에 없는 경우가 많습니다.
 4. 답변을 씁니다(친근한 해요체, 군더더기 없이).
-   - found=true: 자료의 값·용어·이름을 그대로 써서 질문에 정확히 답합니다. 계산이 필요하면 자료의 값으로 계산 과정을 짧게 보여 줍니다. 학습자 코드가 있으면 자료의 예제와 비교해 무엇이 다른지 짚어 줍니다. 자료에 없는 과목 고유 사실은 덧붙이지 않습니다.
+{found_rule}
    - found=false: "그 내용은 수업 자료에서 확인할 수 없어요"라고 정직하게 말하고 지어내지 않습니다. 자료에서 확인되는 가까운 내용이 있으면 한두 문장으로 안내합니다.
 {mode_rule}
 출력: JSON 객체 하나 {{"evidence": "<고른 섹션 ID 또는 NONE>", "found": true 또는 false, "answer": "<학습자에게 보여 줄 답변>"}}"""
+
+FOUND_RULES = {
+    "default": "   - found=true: 자료의 값·용어·이름을 그대로 써서 질문에 정확히 답합니다. 계산이 필요하면 자료의 값으로 계산 과정을 짧게 보여 줍니다. 학습자 코드가 있으면 자료의 예제와 비교해 무엇이 다른지 짚어 줍니다. 자료에 없는 과목 고유 사실은 덧붙이지 않습니다.",
+    # 간결·추출형: 엄격한 판정 모델에서 근거 충실 감점을 줄이려는 가설(DEVLOG 14장). 자료에 그대로 있는 내용만 쓴다.
+    "concise": "   - found=true: 질문이 묻는 것에만 1~3문장으로 답합니다. 답의 핵심 문장은 [자료]의 문장 표현(값·용어·이름·조건)을 거의 그대로 옮겨 씁니다. 자료에 적혀 있지 않은 설명·추론·예시·일반 상식은 덧붙이지 않습니다. 계산이 필요하면 자료의 값과 계산식만 한 줄로 보여 줍니다. 학습자 코드가 있으면 자료의 예제 값과 다른 부분만 짚어 줍니다.",
+}
+ANSWER_STYLE = os.environ.get("ANSWER_STYLE", "concise")  # 간결·추출형 기본(DEVLOG 14장)
 
 MODE_RULES = {
     "answer": "",
@@ -46,7 +53,7 @@ def render(messages: List[Dict[str, str]]) -> str:
 async def grounded_answer(messages, sections: List[Dict[str, str]], mode: str = "answer", deadline=None) -> Dict:
     """sections: [{"id","title","text"}] (검색 순위대로). 반환: {"evidence", "found", "answer"}"""
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
-    system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""))
+    system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""), found_rule=FOUND_RULES.get(ANSWER_STYLE, FOUND_RULES["default"]))
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n마지막 학습자 발화에 답하세요."
     out = await chat_json(system, user, effort=ANSWER_EFFORT, max_tokens=2000, timeout=20, deadline=deadline, hedge_after=9.0)
     ids = {s["id"] for s in sections}
