@@ -11,5 +11,8 @@ __pycache__/
 
 # 로컬 테스트 결과는 Git에서 제외합니다.
 /output/tests/
+
+# KB 원문에서 다시 만들 수 있는 로컬 임베딩 캐시입니다.
+/output/cache/
 submission.json
 AGENTS.md
