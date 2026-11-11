@@ -13,7 +13,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 KB_DIR = Path(__file__).resolve().parents[1] / "kb"
 
@@ -100,6 +100,15 @@ class KB:
         self.chunk_sids = [c["sid"] for c in self.chunks]
         self.sids = list(self.secs)
         self.bm25 = BM25([c["text"] for c in self.chunks])
+        self.bm25_bi = None  # Korean + English chunks, set at server start (app.kb_en)
+
+    def set_english(self, english: List[Optional[str]]) -> int:
+        """Builds the bilingual index from one English text (or None) per chunk; returns how many
+        chunks got a translation. A chunk without one is indexed with its Korean text only."""
+        if len(english) != len(self.chunks):
+            raise ValueError("one translation per chunk expected")
+        self.bm25_bi = BM25([c["text"] + ("\n" + e if e else "") for c, e in zip(self.chunks, english)])
+        return sum(bool(e) for e in english)
 
     def _section_scores(self, chunk_scores: List[float]) -> Dict[str, float]:
         best = defaultdict(lambda: -1e9)
@@ -108,10 +117,12 @@ class KB:
                 best[sid] = float(s)
         return best
 
-    def rank(self, query: str, k_rrf: int = 60, w_bm25: float = 1.0) -> List[Tuple[str, float]]:
-        """BM25 섹션 순위. 점수는 final-v3와 같은 RRF 값(1/(k+순위))이라 순서는 BM25 그대로."""
+    def rank(self, query: str, k_rrf: int = 60, w_bm25: float = 1.0, bilingual: bool = False) -> List[Tuple[str, float]]:
+        """BM25 섹션 순위. 점수는 final-v3와 같은 RRF 값(1/(k+순위))이라 순서는 BM25 그대로.
+        bilingual=True ranks with the Korean + English index when it was built (English questions)."""
+        bm = self.bm25_bi if bilingual and self.bm25_bi is not None else self.bm25
         fused = defaultdict(float)
-        lists = [(self._section_scores(self.bm25.scores(query)), w_bm25)]
+        lists = [(self._section_scores(bm.scores(query)), w_bm25)]
         for scores, w in lists:
             for r, (sid, _) in enumerate(sorted(scores.items(), key=lambda x: -x[1])):
                 fused[sid] += w / (k_rrf + r + 1)

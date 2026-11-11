@@ -72,6 +72,12 @@ def startup_line(*, kb_sections: int, kb_chunks: int, latency_ms: int) -> None:
     _emit({"event": "startup", "kb_sections": kb_sections, "kb_chunks": kb_chunks, "latency_ms": latency_ms})
 
 
+def index_line(*, kb_en_chunks: int, kb_chunks: int, latency_ms: int, error=None) -> None:
+    # English index built at start-up: how many chunks got a translation; never any text.
+    _emit({"event": "index", "kb_en_chunks": kb_en_chunks, "kb_chunks": kb_chunks, "latency_ms": latency_ms,
+           "error": error})
+
+
 def loop_exception(loop, context) -> None:
     """Event-loop exception handler: class name only. asyncio's default handler prints the message
     and a traceback, and an exception message can carry API error text."""

@@ -18,7 +18,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import server  # noqa: E402
-from app import answer, classify_feat, llm, logs, policy, verify  # noqa: E402
+from app import answer, classify_feat, kb_en, llm, logs, policy, verify  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTH = {"Authorization": "Bearer test-token"}
@@ -35,10 +35,17 @@ class Fake:
         self.generate = lambda user, system: {"evidence": SECTION_ID.search(user).group(1), "found": True,
                                               "answer": "자료에 따르면 이렇게 해요."}
         self.ground = {"claims": []}
+        self.translate = lambda user, system: "course material in English"
         self.calls = []
 
     async def once(self, kwargs, timeout):
         system, user = kwargs["messages"][0]["content"], kwargs["messages"][1]["content"]
+        if system == kb_en.TRANSLATE_SYS:
+            self.calls.append("translate")
+            value = self.translate(user, system) if callable(self.translate) else self.translate
+            if isinstance(value, Exception):
+                raise value
+            return value
         if system == classify_feat.SYSTEM:
             kind, value = "classify", self.classify
         elif system == verify.SYSTEM:
@@ -385,6 +392,60 @@ class HedgeTests(unittest.TestCase):
         finally:
             logs._logger.removeHandler(captured)
         self.assertEqual(captured.lines, ["event=asyncio error=ValueError"])
+
+
+class EnglishIndexTests(ServerTestCase):
+    """Start-up translation of the KB and routing of English questions to the bilingual index."""
+
+    def setUp(self):
+        super().setUp()
+        self._bi = server.KB_INDEX.bm25_bi
+
+    def tearDown(self):
+        server.KB_INDEX.bm25_bi = self._bi
+        super().tearDown()
+
+    def test_english_turn(self):
+        def turn(text):
+            return kb_en.english_turn([{"role": "user", "content": "리스트 질문"}, {"role": "assistant", "content": "네"},
+                                       {"role": "user", "content": text}])
+        self.assertTrue(turn("What is a list?"))
+        self.assertTrue(turn("print(x)"))
+        self.assertFalse(turn("list가 뭐야?"))
+        self.assertFalse(turn("ㅋㅋ ok"))
+        self.assertFalse(turn("123"))
+        self.assertFalse(kb_en.english_turn([]))
+
+    def test_startup_builds_the_index_and_english_questions_use_it(self):
+        target = server.KB_INDEX.chunks[7]["sid"]
+        self.fake.translate = lambda user, system: ("zebrafinch rule" if user.startswith(f"[{target} ") else "material")
+        with TestClient(server.app):
+            pass
+        self.assertEqual(self.fake.calls.count("translate"), len(server.KB_INDEX.chunks))
+        english = [{"role": "user", "content": "What is the zebrafinch rule?"}]
+        self.assertEqual(server.retrieve(english)[0]["id"], target)
+        # Korean questions keep the Korean-only index (same ranking as without translations).
+        korean = [{"role": "user", "content": "파이썬 리스트에 값을 추가하는 방법"}]
+        ko_top = server.retrieve(korean)[0]["id"]
+        server.KB_INDEX.bm25_bi = None
+        self.assertEqual(server.retrieve(korean)[0]["id"], ko_top)
+        index = [line for line in self.log.lines if "event=index" in line]
+        self.assertEqual(len(index), 1)
+        self.assertIn(f"kb_en_chunks={len(server.KB_INDEX.chunks)}", index[0])
+
+    def test_failed_translations_leave_korean_text_and_requests_work(self):
+        self.fake.translate = RuntimeError(MARKER)
+        with TestClient(server.app) as client:
+            r = client.post("/tutor", json={"messages": [{"role": "user", "content": "What is a list?"}]}, headers=AUTH)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["action"], "answer")
+        index = [line for line in self.log.lines if "event=index" in line]
+        self.assertIn("kb_en_chunks=0", index[0])
+        self.assertNotIn(MARKER, "\n".join(self.log.lines))
+
+    def test_set_english_needs_one_text_per_chunk(self):
+        with self.assertRaises(ValueError):
+            server.KB_INDEX.set_english(["only one"])
 
 
 class LoggingTests(ServerTestCase):

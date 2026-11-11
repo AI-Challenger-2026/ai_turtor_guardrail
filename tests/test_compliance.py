@@ -40,7 +40,8 @@ class OutputAndLoggingTests(unittest.TestCase):
 
     def test_log_fields_are_allowlisted(self):
         allowed = {"event", "endpoint", "status", "latency_ms", "body_bytes", "input_chars", "n_msgs",
-                   "outcome", "degraded", "error", "kind", "attempt", "hedge", "kb_sections", "kb_chunks"}
+                   "outcome", "degraded", "error", "kind", "attempt", "hedge", "kb_sections", "kb_chunks",
+                   "kb_en_chunks"}
         fields = set(re.findall(r'"(\w+)":', SOURCES["logs.py"]))
         self.assertTrue(fields, "no log fields found")
         self.assertLessEqual(fields, allowed)

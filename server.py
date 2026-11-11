@@ -30,6 +30,7 @@ from app.answer import grounded_answer
 from app.extract import extractive_answer
 from app.classify import classify
 from app.kb import KB, build_query
+from app.kb_en import english_turn, translate_chunks
 from app.llm import DeadlineExceeded
 from app.policy import guard_decision, template_for, tutor_action
 from app.schemas import GuardResponse, TutorResponse
@@ -59,11 +60,27 @@ CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서
 # Guard candidate verifier jury (added on top of final-v3): N calls at once, majority, two that agree
 # decide. 1 = final-v3's single hedged call.
 GROUND_JUDGES = int(os.environ.get("GROUND_JUDGES", "3"))
+# English questions are ranked over Korean + English chunks; the English side is translated by the
+# competition model at start-up (app.kb_en). 0 = Korean index only (final-v3).
+KB_ENGLISH = os.environ.get("KB_ENGLISH", "1") == "1"
+
+
+async def build_english_index() -> None:
+    t0 = time.perf_counter()
+    english = await translate_chunks([c["text"] for c in KB_INDEX.chunks])
+    n = KB_INDEX.set_english(english)
+    logs.index_line(kb_en_chunks=n, kb_chunks=len(KB_INDEX.chunks), latency_ms=round((time.perf_counter() - t0) * 1000))
+
 
 @asynccontextmanager
 async def lifespan(_app):
     # Unretrieved task exceptions are logged by class name only (asyncio would print a traceback).
     asyncio.get_running_loop().set_exception_handler(logs.loop_exception)
+    if KB_ENGLISH:
+        try:
+            await build_english_index()
+        except Exception as e:  # noqa: BLE001  (Korean index only)
+            logs.index_line(kb_en_chunks=0, kb_chunks=len(KB_INDEX.chunks), latency_ms=0, error=type(e).__name__)
     yield
 
 
@@ -96,7 +113,7 @@ async def read_payload(request: Request):
 
 
 def retrieve(messages) -> List[Dict[str, str]]:
-    ranked = KB_INDEX.rank(build_query(messages, "all"))
+    ranked = KB_INDEX.rank(build_query(messages, "all"), bilingual=english_turn(messages))
     return [KB_INDEX.secs[sid] for sid, _ in ranked[:TOP_K]]
 
 

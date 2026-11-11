@@ -16,7 +16,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 ALLOWED = {"event", "endpoint", "status", "latency_ms", "body_bytes", "input_chars", "n_msgs",
-           "outcome", "degraded", "error", "kind", "attempt", "hedge", "kb_sections", "kb_chunks", "embeddings"}
+           "outcome", "degraded", "error", "kind", "attempt", "hedge", "kb_sections", "kb_chunks", "embeddings",
+           "kb_en_chunks"}
 EVENT_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d{3} (event=.*)$")
 UVICORN_LINE = re.compile(r"^(?:INFO|WARNING):\s+(?:Started server process|Waiting for application|"
                           r"Application (?:startup|shutdown)|Uvicorn running on|Shutting down|"
