@@ -186,6 +186,29 @@ class TutorTests(ServerTestCase):
             self.assertEqual(r.status_code, 200)
             self.assertIn(r.json()["action"], ("answer", "abstain", "clarify"))
 
+    def test_found_answer_ends_with_verbatim_material(self):
+        msgs = [{"role": "user", "content": "파이썬 리스트에 값을 추가하는 방법"}]
+        top = server.retrieve(msgs)[0]
+        out = self.tutor(msgs[0]["content"])
+        self.assertIn("\n\n" + server.EXCERPT_HEAD + " ", out["answer"])
+        shown = out["answer"].split(server.EXCERPT_HEAD + " ", 1)[1]
+        for sentence in re.split(r"(?<=[.!?요다]) ", shown):
+            self.assertIn(sentence, top["text"].replace("**", ""))  # verbatim from the cited section
+        self.assertEqual(out["citations"], [top["id"]])
+
+    def test_pii_note_stays_last_after_material(self):
+        self.fake.classify = {**NO_FLAGS, "self_pii": True}
+        out = self.tutor("나는 민지야. 파이썬 리스트에 값을 추가하는 방법")
+        self.assertIn(server.EXCERPT_HEAD, out["answer"])
+        self.assertTrue(out["answer"].endswith(server.PII_NOTE))
+
+    def test_no_material_after_scaffold_or_abstain(self):
+        self.fake.classify = {**NO_FLAGS, "answer_only": True}
+        self.assertNotIn(server.EXCERPT_HEAD, self.tutor("파이썬 리스트에 값을 추가하는 방법 정답만")["answer"])
+        self.fake.classify = dict(NO_FLAGS)
+        self.fake.generate = lambda user, system: {"evidence": "NONE", "found": False, "answer": "자료에서 확인할 수 없어요."}
+        self.assertNotIn(server.EXCERPT_HEAD, self.tutor("파이썬 리스트에 값을 추가하는 방법")["answer"])
+
     def test_answer_is_capped(self):
         self.fake.generate = lambda user, system: {"evidence": SECTION_ID.search(user).group(1), "found": True,
                                                    "answer": "가" * 5000}

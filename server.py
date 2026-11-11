@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 
 from app import logs
 from app.answer import grounded_answer
+from app.excerpt import EXCERPT_HEAD, with_excerpt
 from app.extract import extractive_answer
 from app.classify import classify
 from app.kb import KB, build_query
@@ -63,6 +64,13 @@ GROUND_JUDGES = int(os.environ.get("GROUND_JUDGES", "3"))
 # English questions are ranked over Korean + English chunks; the English side is translated by the
 # competition model at start-up (app.kb_en). 0 = Korean index only (final-v3).
 KB_ENGLISH = os.environ.get("KB_ENGLISH", "1") == "1"
+# Found answers end with verbatim sentences of the cited section (app.excerpt). 0 = final-v3.
+EXCERPT = os.environ.get("EXCERPT", "1") == "1"
+
+
+def last_user_turn(messages) -> str:
+    users = [m.get("content") or "" for m in messages if m.get("role") == "user"]
+    return users[-1] if users else ""
 
 
 async def build_english_index() -> None:
@@ -180,6 +188,10 @@ async def tutor_logic(messages, t0) -> Dict:
         # 인용은 BM25 1위로 정한다: 공개 세트에서 LLM 선택 정확도 70% < BM25 1위 91%
         # (같은 사실이 여러 섹션에 중복돼 있어 LLM은 제목이 그럴듯한 섹션을 고르는 경향).
         citations = [secs[0]["id"]] if CITE_MODE == "bm25" else [g["evidence"]]
+        if EXCERPT and action == "answer":
+            # Verbatim sentences of the cited top section after the answer (app.excerpt); never after
+            # a scaffold, which must not give the answer away.
+            answer = with_excerpt(answer, secs[0]["text"], last_user_turn(messages))
     elif action == "answer":
         action = "abstain"  # 자료에서 확인할 수 없는 질문 → 지어내지 않고 abstain
         # (abstain에도 1위 섹션을 인용하는 안은 기각: 판정 모델이 인용 섹션과 대조해 근거 충실을 깎았다 — DEVLOG 16장)
