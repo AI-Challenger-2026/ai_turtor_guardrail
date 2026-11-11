@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.answer import grounded_answer
+from app.extract import extractive_answer
 from app.classify import classify
 from app.kb import KB, build_query
 from app.llm import log
@@ -36,6 +37,7 @@ MAX_ANSWER = 4000
 TOP_K = int(os.environ.get("TOP_K", "1"))
 VERIFY_TOP_K = int(os.environ.get("VERIFY_TOP_K", "4"))  # 가드 후보 답변 검증은 여러 섹션과 대조
 CITE_MODE = os.environ.get("CITE_MODE", "bm25")  # "bm25" | "llm"
+EXTRACTIVE_FALLBACK = os.environ.get("EXTRACTIVE_FALLBACK", "1") == "1"  # 생성 실패 시 자료 발췌 답변(16장)
 SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 튜터: 분류와 답변 생성 동시 시작
 GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_material 범주 판정(DEVLOG 13장)
 GUARD_OOM_MODE = os.environ.get("GUARD_OOM_MODE", "parallel")  # "parallel": 처음부터 동시 실행(기본) | "after": 분류가 normal일 때만 뒤이어 확인(가드 지연 증가로 기각)
@@ -112,6 +114,12 @@ async def tutor_logic(messages, t0) -> Dict:
     else:
         g = await gen_task
     if g is None:
+        # 답변 생성 실패·시간 초과: 기본 응답 대신 1위 섹션 발췌 + 인용(대필 모드는 발췌가 '대신 써 주기'가 될 수 있어 제외)
+        mode_now = "academic" if c["category"] == "academic_dishonesty" else ""
+        ext = "" if mode_now == "academic" or not EXTRACTIVE_FALLBACK else extractive_answer(messages, secs[0])
+        if ext:
+            log("tutor_extractive_fallback")
+            return {"answer": ext[:MAX_ANSWER], "action": action, "citations": [secs[0]["id"]]}
         return {"answer": FALLBACK, "action": action, "citations": citations}
     answer = g["answer"]
     if g["found"]:
@@ -120,6 +128,7 @@ async def tutor_logic(messages, t0) -> Dict:
         citations = [secs[0]["id"]] if CITE_MODE == "bm25" else [g["evidence"]]
     elif action == "answer":
         action = "abstain"  # 자료에서 확인할 수 없는 질문 → 지어내지 않고 abstain
+        # (abstain에도 1위 섹션을 인용하는 안은 기각: 판정 모델이 인용 섹션과 대조해 근거 충실을 깎았다 — DEVLOG 16장)
     if c["category"] == "pii_disclosure" and "개인정보" not in answer:
         answer = answer.rstrip() + " " + PII_NOTE  # 개인정보 안내는 코드로(이전의 pii 모드와 같은 문장)
     return {"answer": answer[:MAX_ANSWER], "action": action, "citations": citations}
