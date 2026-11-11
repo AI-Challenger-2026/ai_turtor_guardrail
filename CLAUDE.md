@@ -37,43 +37,29 @@
 
 ## 3. 코드 구조
 
-- `server.py`: 기동용(`python3 -m uvicorn server:app`), `app.main.app`을 가져오기만 한다.
-- `app/main.py`: 라우트, 토큰 검사, 422 처리기, 요청 전체 마감(25초), `SafetyNet` 미들웨어(예외를 200 대체 응답으로 바꾸고 다시 던지지 않음, 요청당 메타데이터 로그 한 줄).
-  lifespan에서 지식 베이스 임베딩을 만든 뒤 요청을 받는다. /tutor와 /guard 모두 판정과 검색을 동시에 돌리고, 필요 없으면 검색을 취소한다.
-  /guard: block이면 후보 답변은 `{grounded: true, [], safe: false}`. allow + 후보 답변이면 근거 판정. 후보 답변 없이 normal이면 자료 확인 → 없으면 out_of_material(decision은 그대로 allow).
-- `app/schemas.py`: 요청·응답 Pydantic 모델(Literal). `spec_version`, `session_id`는 쓰지 않으므로 선언하지 않는다.
-- `app/llm.py`: 공용 AsyncOpenAI 클라이언트(채팅은 `OPENAI_*`, 임베딩은 `EMBEDDING_*`만). `chat_text`(1회), `chat_json`(json_object + Pydantic 검증 + 재시도), `embed`. 호출마다 메타데이터 로그.
-  운영진 프록시는 스트리밍이 아닌 호출의 `max_completion_tokens`가 2000을 넘으면 HTTP 400으로 거절한다(생성·판정 모두 2000 이하).
-- `app/logs.py`: 허용 필드만 남기는 로그. openai/httpx 로거는 WARNING으로 고정(`OPENAI_LOG=debug`가 본문을 찍는 것 방지).
-- `app/deadline.py`, `app/config.py`, `app/templates.py`(고정 문구).
-- `app/classify.py`: low_signal 규칙 → LLM 판정(JSON, `{"category", "harm_kind"}`, 시도당 10초, 재시도 1회, 모두 실패 시 normal).
-  다수결: 판정 2회를 동시에 보내고 (범주, harm_kind)가 다르면 3번째로 다수결(`CLASSIFY_VOTES`, 환경변수 1 또는 3, 기본 3). 다수가 없으면 범주 → block/allow 다수 → 첫 호출 순. out_of_material은 normal로 바꾸고, 자료 유무는 생성기가 정한다. 판정 결과는 로그에 남기지 않는다.
-  자기소개 규칙: 다수결 결과가 normal이고 마지막 발화가 자기소개 문형(나/저 + 학교 + 학년 + 이름, 또는 "내 이름은 ○○")이면 pii_disclosure. 일반 문형만 보고 이름·학교 목록은 쓰지 않는다. 판정 호출이 모두 실패한 경우에는 적용하지 않는다.
-  few-shot = 고정 20개 + 요청마다 고르는 비슷한 예시 6개(`CLASSIFY_DYNAMIC_SHOTS`, 가장 비슷한 것이 마지막). 예시 저장소는 예시용 분할 중 예시가 될 수 있는 143건(low_signal·out_of_material·공개 라벨로 harm_kind를 알 수 없는 가드 harmful 제외), 글자 2-gram BM25(마지막 발화 2배 + 이전 학습자 발화).
-  `classify(..., exclude=)`는 평가 전용(묶음 제외 평가). 라우트는 쓰지 않는다(규칙 점검 테스트).
-- `app/fewshot.py` + `app/fewshot_ids.json`: id만 담는다. harm_kind는 공개 튜터 action에서만 얻는다(refuse → request, redirect → statement).
-- `app/prompts.py`: 판정 프롬프트, 튜터 생성 프롬프트(answer·scaffold 규칙, 인용 규칙), `FOUND_RULES`(자료 유무 판단, 튜터 생성과 가드 자료 확인이 같은 문구를 씀), 근거 판정 프롬프트, 영어 질문 번역 프롬프트, 대화 렌더링(긴 발화는 앞과 끝을 남기고 자름). `app/fewshot.py` + `app/fewshot_ids.json`: few-shot은 공개 세트 id만 두고 시작 때 `public/`에서 읽음. 평가용 id가 섞이면 서버가 뜨지 않는다.
-- `app/policy.py`: 범주 → decision, (범주, harm_kind) → action·템플릿. `app/templates.py`: 고정 문구(사용자 발화를 끼워 넣지 않음).
-- `app/retrieval.py`: 섹션 = md + 같은 이름의 표 CSV(채점기 `load_kb_dir`와 같은 결합). 글자 2-gram BM25(모듈을 불러올 때 색인), 소제목(`## `) 조각 244개 임베딩(시작 때).
-  질의 = 대화 전체(튜터의 이전 답변이 학습자가 보는 페이지를 알려 줌) + `extra`(가드의 후보 답변). 후보 5개 = BM25 상위 4 + BM25에 없는 임베딩 1위. 질의 임베딩이 3초를 넘거나 실패하면 BM25만. 요청 중에는 상태를 쓰지 않는다.
-  마지막 발화가 영어 위주(라틴 문자 12자 이상, 한글의 2배 초과)면 minimal 번역 1회(4초)를 임베딩과 동시에 돌려 BM25 질의에 덧붙인다. 번역 프롬프트의 용어집은 시작 때 지식 베이스(섹션 제목, 과정 고유 이름)에서 만든다.
-- `app/generate.py`: `generate_tutor(messages, verdict, hits, mode=, deadline=)`. JSON 1회 호출 `{"found", "citations", "answer"}`(재시도 1회, effort low).
-  found=false면 action abstain(자료에 없다고 말하고 가까운 자료 내용을 덧붙여 인용). answer_seeking은 scaffold 모드(자료의 규칙·값은 말하고 최종 답은 말하지 않음), 실패하면 SCAFFOLD_ANSWER_SEEKING 문구.
-  인용 = 모델이 고른 섹션(보여 준 것만) + 검색 1위, 최대 2개. pii면 이름·학교를 되풀이하지 말라는 지시 + 끝에 PII_NOTICE.
-  answer 모드에서 found=true면 답변 뒤에 검색 1위 섹션 문장 2개를 원문 그대로 덧붙인다(`excerpt`, "수업 자료 원문:"). 문장은 질문·답변과의 겹침으로 고르고, 답변이 이미 말한 문장은 뺀다. 지식 베이스 문장만 쓴다. 스캐폴드와 abstain에는 붙이지 않는다.
-  생성이 실패하거나 시간이 다 되면 같은 문장으로 답한다(`from_material`, action은 그대로, 검색 1위 인용).
-- `app/grounding.py`: `judge_grounding(messages, candidate, hits, deadline=)` → (grounded, 근거 없는 구간).
-  배심원: 판정 `GROUND_JUDGES`회(환경변수 1~3, 기본 3)를 동시에, 다수결(동수면 첫 판정). 전체의 과반이 같은 결론이면 나머지 판정은 취소하고 바로 정한다(3명이면 2명 일치).
-  구간은 근거 없음이라 한 첫 두 판정이 겹치는 글자만(4자 미만이면 첫 판정 구간). "첫"은 끝난 순서가 아니라 보낸 순서. 구간은 후보 답변의 부분 문자열만 남긴다(따옴표·끝 구두점 정리, 겹침 제거, 최대 4개).
-  근거 없음인데 쓸 구간이 없으면 후보 답변 전체를 구간으로 낸다. 판정 실패 시 `(True, [])` + degraded=ground. `judge_found(messages, hits, deadline=)` → 자료 유무(실패 시 normal 유지 + degraded=found).
-- 판정기 reasoning_effort는 환경변수 `CLASSIFY_EFFORT`(기본 low, 단계 4에서 결정).
+서버는 팀원 저장소의 final-v3(`origin/wonwoo` `8bdc5c4`, 공식 6회 평균 89.49)를 옮긴 것이다. 분류·생성·검증·흐름은 그대로이고, 이식하며 바꾼 것은 로그(print·파일 쓰기 → `app/logs.py`), 응답 검증(`app/schemas.py`), numpy 제거(BM25 순위 동일, 공개 근거 1위 108/119), 쓰지 않는 임베딩·캐시·`safety.py` 삭제,
+헤지 정리(실패한 호출의 예외를 거두고, 호출자가 취소되면 남은 호출도 취소. final-v3는 이 경우 asyncio 트레이스백을 남기고 쓰지 않을 호출을 끝까지 돌림)와 이벤트 루프 예외 처리기(클래스 이름만)뿐이다. 이전 우리 서버는 `7d44c16`에 있다.
+
+- `server.py`: 기동(`python3 -m uvicorn server:app`)과 흐름 전체. 본문은 관대하게 읽고(깨진 JSON·필드는 빈 값), 응답은 Literal 모델로 검증하며, 예외·검증 실패는 200 대체 응답. 요청 예산 23초(`REQUEST_BUDGET`), 튜터 분류 12초.
+  - /tutor: BM25 1위 섹션 하나로 답변 생성(answer 모드)을 분류와 동시에 시작(추측 실행). 고정 문구 범주면 생성 취소. answer_seeking·academic_dishonesty는 분류 뒤 힌트·대필 거절 모드로 다시 생성. off_topic인데 생성기가 자료에서 답을 찾으면 normal. found=false면 abstain(인용 없음). 인용 = BM25 1위. pii면 끝에 PII_NOTE.
+    생성 실패: academic은 고정 문구, 분류가 성공했으면(flags 있음) 1위 섹션 발췌 + 인용, 분류도 실패했으면 FALLBACK.
+  - /guard: 분류, 후보 답변 검증, 자료 확인(생성기 found)을 동시에. off_topic + found → normal. block이면 후보 답변 `{grounded: true, [], safe: false}`, allow면 검증 구간(없으면 grounded). 후보 답변 없이 normal인데 found=false면 out_of_material(decision은 allow).
+- `app/classify.py` + `app/classify_feat.py`: 예/아니오 신호 9개(self_pii, distress, jailbreak, harm, hate, submit_work, answer_only, off_topic, low_signal)를 3회 동시 판정, 신호별 과반 → 코드 우선순위 규칙으로 범주. 프롬프트 예시는 팀원이 쓴 문장(공개 문항 아님). 모두 실패하면 normal(flags 없음). low, 시도당 20초, 7초 헤지.
+- `app/answer.py`: 생성 프롬프트(concise_full: 근거 문장을 통째로 옮김), 모드 answer/scaffold/academic. `{"evidence","found","answer"}`, evidence가 보여 준 섹션이 아니면 found=false. 9초 헤지.
+- `app/verify.py`: 후보 답변의 과목 고유 사실 주장을 자료(후보 답변 가중 검색 상위 4섹션)와 대조, contradict·absent의 wrong_part를 구간으로. 후보 답변에 없는 구간, 응대·안내 문장(`_NON_CLAIM`)에 걸린 구간은 버린다. 실패하면 근거 있음.
+- `app/kb.py`: 섹션 = md + 표 CSV, 청크 = `## ` 조각, 글자 2-gram BM25(서버 시작 때 색인), 질의 = 최근 6발화 + 마지막 발화. 임베딩은 쓰지 않는다.
+- `app/extract.py`: 생성 실패 시 1위 섹션에서 질문과 겹치는 문장 2개. `app/policy.py`: 범주 → decision·action, 고정 문구.
+- `app/llm.py`: AsyncOpenAI(`OPENAI_*` 환경변수), json_object, 재시도 1회, 헤지(느리면 같은 요청 하나 더, 먼저 성공한 쪽), deadline. 호출마다 메타데이터 한 줄(kind, status, attempt, hedge).
+  운영진 프록시는 스트리밍이 아닌 호출의 `max_completion_tokens`가 2000을 넘으면 HTTP 400으로 거절한다(모두 2000 이하).
+- `app/logs.py`: 허용 필드만 남기는 로그. 요청마다 ContextVar의 dict에 outcome, degraded(실패한 단계 이름), error(클래스 이름)를 모아 요청 한 줄로 남긴다. uvicorn 접근 로그 끔, openai/httpx 로거 WARNING.
+- `app/schemas.py`: 응답 Pydantic 모델(Literal).
 
 ## 4. 테스트와 평가
 
 ```bash
 # offline tests (fake LLM, no network)
 python3 -m unittest discover -s tests -t . -v
-# live smoke test against the 8001 test server (2 tutor generations); marker must not appear in the server log
+# live smoke test against the 8001 test server (about 30 API calls); marker must not appear in the server log
 python3 tests/smoke_live.py --base http://localhost:8001
 set -a; . ./.env; set +a
 # test server
@@ -83,34 +69,25 @@ python3 harness/score_local.py --tutor-url http://localhost:8001/tutor --guard-u
   --token "$TEAM_TOKEN" --public eval/public_dev --kb kb --workers 64
 # guard metrics (confusion matrix, block P/R/F1, latency)
 python3 eval/guard_report.py --url http://localhost:8001/guard --data eval/public_dev/guard.jsonl --workers 64
-# classifier only, more samples: also send dev tutor items to /guard (no generation calls)
-python3 eval/guard_report.py --url http://localhost:8001/guard --data eval/public_dev/guard.jsonl eval/public_dev/tutor.jsonl --workers 64
-# tutor actions, abstain P/R, citation P/R/F1, latency, PII name repetition (no judge calls); --categories/--ids to run a subset
+# tutor actions, abstain P/R, citation P/R/F1, latency; --categories/--ids to run a subset
 python3 eval/tutor_report.py --url http://localhost:8001/tutor --categories pii_disclosure
-# tuning set for generation (fewshot split minus few-shot ids), generation categories only
+# tuning set (the whole fewshot split: final-v3 has no public few-shot examples)
 python3 eval/tune_ids.py > /tmp/tune_ids.txt
-python3 eval/tutor_report.py --url http://localhost:8001/tutor --data public/tutor.jsonl --ids @/tmp/tune_ids.txt \
-  --categories normal,pii_disclosure,answer_seeking,out_of_material --workers 16
-# retrieval recall (embedding calls only; --vec-cache keeps vectors in a local eval-only file)
-python3 eval/retrieval_report.py --split fewshot
 # tutor points split into the grader's items (action, citation F1, gold facts, faithfulness); uses the local judge
 python3 eval/tutor_breakdown.py --url http://localhost:8001/tutor --data public/tutor.jsonl --ids @/tmp/tune_ids.txt \
   --categories normal,pii_disclosure,answer_seeking,out_of_material --dump /tmp/breakdown.json
-# classifier only, in-process, leave-group-out on fewshot-split items (--dynamic 0 = static shots only, --votes 1|3)
-python3 eval/classify_report.py --ids @/tmp/tune_ids.txt --dynamic 6 --votes 3 --json-out /tmp/run.json
-# guard candidate judge only, in-process (no public examples in the judge, so every fewshot-split item is fair)
-python3 eval/ground_report.py --split fewshot --judges 3 --runs 2
+# server log summary after a run (counts and latencies only; never prints a log line)
+python3 eval/log_summary.py logs/8000.log --last-run
 ```
 
-- `tests/test_task2.py`(검색·생성), `tests/test_task3.py`(가드 근거 판정·자료 확인·영어 번역 검색).
-- `tests/test_compliance.py`: 대회 규칙 정적 점검(본문 print·로그, 다른 네트워크 클라이언트·호스트, 캐시, 파일 쓰기, `app/`의 데이터 파일, 평가용 문장·참고 답안이 코드에 들어갔는지). 규칙을 증명하지는 않고 어긋나면 알린다.
-- 실서버 로그 감사: 모든 줄이 `event=` 메타데이터(허용 필드만) 또는 uvicorn 시작·접근 줄이어야 한다.
+- `tests/test_server.py`(가짜 API 호출로 흐름·대체 응답·로그), `tests/test_compliance.py`(대회 규칙 정적 점검: 본문 print·로그, 다른 네트워크 클라이언트·호스트, 캐시, 파일 쓰기, `app/`의 데이터 파일, 공개 문항 문장·참고 답안이 코드에 들어갔는지. final-v3는 공개 400건 전체로 조정했으므로 400건 모두 확인), `tests/test_log_summary.py`.
+- 실서버 로그 감사: 모든 줄이 `event=` 메타데이터(허용 필드만) 또는 uvicorn 시작 줄이어야 한다(`eval/log_summary.py`의 감사 항목이 0).
 
 - 공개 세트 분할: `eval/make_split.py` → `eval/split.json`(묶음별 `fewshot`/`dev` 배정), `eval/public_dev/`(평가용 jsonl).
   - 사용자 발화 문자 3-gram Jaccard 0.5 이상(전체 사용자 발화 결합 또는 마지막 발화 중 하나라도)이면 같은 묶음.
   - (엔드포인트, 묶음 범주 조합)으로 층화, 고정 seed.
-- 평가용(`dev`) 문항은 프롬프트나 few-shot에 넣지 않는다.
-- 프롬프트·few-shot 조정은 조정용 세트(`python3 eval/tune_ids.py`: 예시용 분할 중 few-shot이 아닌 문항)로 하고, 평가용은 단계 끝 확인에만 쓴다. few-shot은 `fewshot` 분할의 공개 세트 id 목록만 두고 서버 시작 때 `public/`에서 불러온다.
+- 평가용(`dev`) 문항은 프롬프트에 넣지 않는다. 우리가 더하는 변경은 조정용 세트로 맞추고 평가용은 확인에만 쓴다.
+- final-v3는 작성자가 공개 400건 전체로 조정했으므로 평가용 분할 점수가 실제보다 낙관적이다. 이전 우리 버전(평가용 5회 평균 87.50)과 절대값을 비교하지 말고, final-v3 위에 얹은 변경끼리 비교한다.
 
 ## 5. 기준선
 
@@ -208,17 +185,20 @@ python3 eval/ground_report.py --split fewshot --judges 3 --runs 2
   - 자료 원문 덧붙이기 채택: 생성 없이 검색 1위 문장만 내도 조정용 51건 89.2점(기존 대체 문구 50점). 생성 답변에 덧붙이면 저장된 답변 기준 판정 사실 0.878·0.894 → 0.939·0.936, 정답 값 포함 0.917·0.913 → 0.958·0.957, 정답 사실 3-gram 일치 0.484·0.469 → 0.630·0.646, 충실성 0.939·0.936 → 0.939·0.894(1회 판정).
     평가용 분할 전체(workers 64): 총점 87.83(튜터 86.67, 가드 88.98), 형식 오류 0, 판정 오류 0, 로그 감사 0줄, 실행 86.3초. 가드는 코드가 같은데 낮게 나온 회차. 튜터 p50 10.5초·p95 22.9초·최대 24.8초(생성 호출 p95 11.4 → 15.9초, 코드 변화 없이 프록시 혼잡), 생성 실패 2건은 자료 문장으로 응답.
 
+- final-v3 이식(`chan-v3`, 0단계) 평가용 분할 3회(workers 64): 87.0 / 90.87 / 88.31, 평균 88.73(튜터 84.58, 가드 92.87), 형식 오류 0, 판정 오류 0.
+  같은 분할의 이전 우리 `7d44c16` 5회 평균은 87.50(튜터 84.48, 가드 90.51). final-v3는 공개 400건 전체로 조정됐으므로 이 비교는 final-v3 쪽으로 낙관적이다.
+  지연: 튜터 p50 5.4~7.6초·p95 11.0~14.8초·최대 23.0초(생성 시간 초과 1건 → academic 고정 문구), 가드 p50 4.6~5.7초·p95 9.4~10.7초·최대 13.6초. 호출 874~1,008회(헤지 21~154).
+  1회차 로그에 asyncio 트레이스백 1건(헤지 경로, `ValueError: empty completion`, 본문 없음) → 헤지 정리로 고침, 고친 코드로 스모크 18/18·로그 감사 0줄.
+
 ## 6. 확정된 설계 결정
 
-- 가드 근거 판정은 3명 다수결 배심원(2명이 일치하면 바로 결정), 구간은 판정끼리 겹치는 부분.
-- 판정기는 low + 다수결(2회 동시, 다르면 3번째). 예시 저장소는 예시용 분할만(공개 세트 전체로 넓혀도 묶음 제외 평가에서 이득 없음).
+- 기반은 팀원 final-v3. 우리 `7d44c16`의 기법은 단계별로 옮기고, 부분 평가로 이득이 확인된 것만 채택한다(평가용 전체 실행은 안전 확인용이며 3회로는 1점 미만 차이를 가리지 못한다).
 - 가드 decision은 범주 표로 정한다. block = `academic_dishonesty`, `harmful_content`, `jailbreak_injection`, `off_topic`.
 - 튜터 action: normal·pii_disclosure → answer, out_of_material → abstain, answer_seeking·academic_dishonesty → scaffold,
   jailbreak_injection → refuse, off_topic → redirect, emotional_distress → escalate, low_signal_input → clarify,
-  harmful_content → 실행 요청이면 refuse, 차별·모욕 발언이면 redirect.
-- low_signal 규칙: 마지막 사용자 발화 원문에서 공백을 뺀 문자열이 비었거나, 1~12자이면서 완성형 한글·영문·숫자가 없으면 low_signal_input.
-- 가드 out_of_material은 판정기가 아니라 지식 베이스로 정한다(후보 답변 없는 normal 입력만). 정상 문항을 oom으로 답해도 범주 정확도(정답 normal은 채점 안 함)와 block F1(둘 다 allow)에 손해가 없다.
-- abstain은 고정 문구가 아니라 생성한다: 자료에 없다고 말하고, 자료의 가장 가까운 내용을 덧붙여 그 섹션을 인용한다(사용자 결정).
-- answer_seeking 스캐폴드는 자료의 규칙·값은 알려 주고 최종 선택지·계산 결과는 말하지 않는다(정답 사실 라벨이 규칙이라서).
-- 대체 응답: tutor 요청 검증 실패(422)는 CLARIFY 문구 + `clarify`, 생성 실패·시간 초과는 검색 1위 섹션 문장 + `answer`(자료가 없거나 요청 전체 마감이면 FALLBACK 문구, answer_seeking은 SCAFFOLD_ANSWER_SEEKING + `scaffold`),
-  guard 실패는 `allow`/`normal`(후보 답변이 있으면 grounded true, unsupported [], safe true).
+  harmful_content → harm이면 refuse, hate면 redirect.
+- 가드 out_of_material은 분류기가 아니라 생성기의 found로 정한다(후보 답변 없는 normal 입력만). 정상 문항을 oom으로 답해도 범주 정확도(정답 normal은 채점 안 함)와 block F1(둘 다 allow)에 손해가 없다.
+- abstain은 생성한다(자료에 없다고 말하고 가까운 내용을 한두 문장). final-v3는 abstain에 인용을 붙이지 않는다(팀원 실험: 1위 섹션을 인용하면 충실성 감점). 이전 우리 서버는 가까운 섹션을 인용했다.
+- low_signal_input은 분류기 신호로 정한다(이전 우리 서버의 글자 규칙은 없다).
+- 대체 응답: 생성 실패·시간 초과는 1위 섹션 발췌 + 인용(분류도 실패했으면 FALLBACK, academic은 고정 문구). 예외·응답 검증 실패는 tutor `answer` + FALLBACK, guard `allow`/`normal`(후보 답변이 있으면 grounded true, unsupported [], safe true).
+- 헤지 요청은 final-v3 그대로 둔다. 새로 더하는 반복 호출(배심원 등)에는 헤지를 붙이지 않는다.

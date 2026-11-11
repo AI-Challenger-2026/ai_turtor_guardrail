@@ -1,126 +1,140 @@
-"""Async chat client for the organizer-provided model (OPENAI_* environment only).
+"""운영진 제공 LLM(gpt-5-nano) 호출 헬퍼. 요청·응답 본문은 로그에 남기지 않는다.
 
-- One shared AsyncOpenAI client, no SDK retries (retries are explicit and budgeted here).
-- Every call is logged as metadata only: kind, status, latency, attempt, error class.
+시간 예산: 채점기는 요청당 30초에서 끊는다. 모든 호출은 절대 시각 `deadline`을 받아,
+남은 시간 안에서만 시도·재시도한다(재시도가 30초를 넘기는 일을 막음).
 """
 import asyncio
+import json
+import os
 import time
-from typing import Callable, List, Optional, Type, TypeVar
+from typing import Optional
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ValidationError
 
-from . import config, logs
+from . import logs
 
-T = TypeVar("T", bound=BaseModel)
+MODEL = os.environ.get("OPENAI_MODEL", "openai/gpt-5-nano")
+MIN_ATTEMPT = 1.5  # 남은 시간이 이보다 짧으면 새로 시도하지 않는다(초)
 
-# Reads OPENAI_API_KEY and OPENAI_BASE_URL from the environment.
-_client = AsyncOpenAI(timeout=config.REQUEST_DEADLINE_S, max_retries=0)
-# Embeddings use only the EMBEDDING_* settings; no client at all if they are missing.
-_embed_client = (AsyncOpenAI(api_key=config.EMBED_API_KEY, base_url=config.EMBED_BASE_URL,
-                             timeout=config.EMBED_STARTUP_TIMEOUT_S, max_retries=0)
-                 if config.EMBED_ENABLED else None)
+_client = None
 
 
-class EmptyCompletion(Exception):
-    """The model returned no text."""
+def client() -> AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(timeout=25, max_retries=0)
+    return _client
 
 
-class TruncatedCompletion(EmptyCompletion):
-    """finish_reason == "length" with no text (or, in JSON mode, any text): the token budget ran out."""
+class DeadlineExceeded(Exception):
+    pass
 
 
-def _error_kind(exc: Exception) -> str:
-    """Exception class name; for validation errors also the failing field names (never values)."""
-    if isinstance(exc, ValidationError):
-        fields = sorted({str(e["loc"][0]) if e.get("loc") else "-" for e in exc.errors()})
-        return f"ValidationError[{','.join(fields)}]"
-    return type(exc).__name__
+async def _once(kwargs, timeout: float) -> str:
+    r = await asyncio.wait_for(client().chat.completions.create(**kwargs), timeout=timeout)
+    return (r.choices[0].message.content or "").strip()
 
 
-async def _call(kind: str, messages: List[dict], *, effort: str, max_tokens: int, timeout: float,
-                attempt: int, json_mode: bool, parse: Callable[[str], object]):
-    t0 = time.perf_counter()
-    status, error = "ok", None
-    try:
-        if timeout <= 0:
-            raise asyncio.TimeoutError
-        kwargs = dict(model=config.CHAT_MODEL, messages=messages, max_completion_tokens=max_tokens,
-                      extra_body={"reasoning_effort": effort}, timeout=timeout)
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        resp = await _client.chat.completions.create(**kwargs)
-        choice = resp.choices[0]
-        text = (choice.message.content or "").strip()
-        truncated = getattr(choice, "finish_reason", None) == "length"
-        if not text or (json_mode and truncated):
-            # A cut-off JSON object is reported as truncated rather than as a validation error.
-            raise TruncatedCompletion if truncated else EmptyCompletion
+def _valid(text: str, json_mode: bool) -> str:
+    if not text:
+        raise ValueError("empty completion")
+    if json_mode:
+        json.loads(text)
+    return text
+
+
+async def _hedged(kwargs, t: float, hedge_after: Optional[float], json_mode: bool,
+                  kind: str = "llm", rnd: int = 1) -> str:
+    """헤지 요청: hedge_after초 안에 안 끝나면 같은 요청을 하나 더 보내 먼저 성공한 쪽을 쓴다.
+    API가 가끔 응답 없이 멈추는 경우(실제 채점에서 26초 대체 발생)의 꼬리 지연을 줄인다."""
+    async def attempt(tt, hedge=0):
+        # One metadata line per API call (status and error class only; never the completion).
+        t0 = time.perf_counter()
+        status, err = "ok", None
         try:
-            return parse(text)
-        except Exception:
-            status = "invalid"
+            text = await _once(kwargs, tt)
+        except asyncio.CancelledError:
+            status = "cancelled"
             raise
-    except asyncio.CancelledError:
-        status = "cancelled"
-        raise
-    except Exception as exc:
-        if status == "ok":
-            status = "error"
-        error = _error_kind(exc)
-        raise
-    finally:
-        logs.llm_line(kind=kind, status=status, latency_ms=round((time.perf_counter() - t0) * 1000),
-                      attempt=attempt, error=error)
+        except Exception as e:  # noqa: BLE001
+            status, err = "error", type(e).__name__
+            raise
+        else:
+            try:
+                return _valid(text, json_mode)
+            except Exception as e:  # noqa: BLE001
+                status, err = "invalid", type(e).__name__
+                raise
+        finally:
+            logs.llm_line(kind=kind, status=status, latency_ms=round((time.perf_counter() - t0) * 1000),
+                          attempt=rnd, hedge=hedge, error=err)
 
+    made = []
 
-async def chat_text(kind: str, messages: List[dict], *, effort: str, max_tokens: int,
-                    timeout: float) -> Optional[str]:
-    """One attempt; returns the stripped text or None on any failure."""
+    def spawn(tt, hedge=0):
+        task = asyncio.create_task(attempt(tt, hedge))
+        made.append(task)
+        return task
+
     try:
-        return await _call(kind, messages, effort=effort, max_tokens=max_tokens, timeout=timeout,
-                           attempt=1, json_mode=False, parse=lambda s: s)
-    except Exception:
-        return None
-
-
-async def embed(kind: str, texts: List[str], *, timeout: float, attempt: int = 1) -> Optional[List[List[float]]]:
-    """Embed `texts` (one request). Returns one vector per text, or None on any failure."""
-    if _embed_client is None or not texts:
-        return None
-    t0 = time.perf_counter()
-    status, error = "ok", None
-    try:
-        if timeout <= 0:
-            raise asyncio.TimeoutError
-        resp = await asyncio.wait_for(
-            _embed_client.embeddings.create(model=config.EMBED_MODEL, input=texts, timeout=timeout),
-            timeout=timeout)
-        data = sorted(resp.data, key=lambda d: d.index)
-        if len(data) != len(texts) or any(not d.embedding for d in data):
-            raise EmptyCompletion
-        return [list(d.embedding) for d in data]
-    except asyncio.CancelledError:
-        status = "cancelled"
-        raise
-    except Exception as exc:
-        status, error = "error", _error_kind(exc)
-        return None
+        first = spawn(t)
+        if not hedge_after or t - hedge_after < MIN_ATTEMPT:
+            return await first
+        done, _ = await asyncio.wait({first}, timeout=hedge_after)
+        if first in done and first.exception() is None:
+            return first.result()
+        tasks = {first} if first not in done else set()
+        tasks.add(spawn(t - hedge_after, hedge=1))
+        last: BaseException = first.exception() if first in done else RuntimeError("hedge")
+        while tasks:
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for d in done:
+                if d.exception() is None:
+                    return d.result()
+                last = d.exception()
+        raise last
     finally:
-        logs.llm_line(kind=kind, status=status, latency_ms=round((time.perf_counter() - t0) * 1000),
-                      attempt=attempt, error=error)
+        # Port fix: cancel calls still running (also when the caller itself is cancelled, which
+        # final-v3 left running) and collect the exception of any that failed. In final-v3 a failed
+        # call finishing together with a successful one was never collected, and asyncio printed
+        # its traceback with the exception message.
+        for x in made:
+            if not x.done():
+                x.cancel()
+            elif not x.cancelled():
+                x.exception()
 
 
-async def chat_json(kind: str, messages: List[dict], schema: Type[T], *, effort: str, max_tokens: int,
-                    timeout: Callable[[], float], retries: int = 1) -> Optional[T]:
-    """JSON-mode call validated against `schema`; retried on any failure. None if all attempts fail.
-
-    `timeout` is a callable so each attempt gets a fresh, budget-capped value.
-    """
-    for attempt in range(1, retries + 2):
+async def chat(system: str, user: str, *, effort: str = "minimal", max_tokens: int = 2000,
+               timeout: float = 20, json_mode: bool = False, retries: int = 1,
+               deadline: Optional[float] = None, hedge_after: Optional[float] = None,
+               kind: str = "llm") -> str:
+    """LLM을 호출해 텍스트(json_mode면 파싱 가능한 JSON 텍스트)를 돌려준다.
+    빈 응답·JSON 파싱 실패·오류는 deadline 안에서 retries만큼 다시 시도한다."""
+    kwargs = dict(
+        model=MODEL,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_completion_tokens=min(max_tokens, 2000),  # 운영 API: 비스트리밍은 2000 초과 시 400
+        extra_body={"reasoning_effort": effort},
+    )
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    last: Exception = RuntimeError("no attempt")
+    for rnd in range(1, retries + 2):
+        t = timeout
+        if deadline is not None:
+            t = min(timeout, deadline - time.time())
+            if t < MIN_ATTEMPT:
+                raise DeadlineExceeded() from last
         try:
-            return await _call(kind, messages, effort=effort, max_tokens=max_tokens, timeout=timeout(),
-                               attempt=attempt, json_mode=True, parse=schema.model_validate_json)
-        except Exception:
-            continue
-    return None
+            return await _hedged(kwargs, t, hedge_after, json_mode, kind, rnd)
+        except Exception as e:  # noqa: BLE001
+            last = e
+    raise last
+
+
+async def chat_json(system: str, user: str, **kw) -> dict:
+    out = json.loads(await chat(system, user, json_mode=True, **kw))
+    if not isinstance(out, dict):
+        raise ValueError("not a JSON object")
+    return out

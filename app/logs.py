@@ -1,14 +1,19 @@
 """Metadata-only logging.
 
 Allowed fields: time, endpoint, status code, latency, input length, error kind.
-Never log request/answer text, LLM output, verdict reasons, or exception messages
+Never log request/answer text, LLM output, verdicts, or exception messages
 (a pydantic ValidationError message embeds the input). Exceptions are logged by class name.
+
+Each request gets its own metadata dict in a ContextVar (set by the route). Tasks created inside
+the request copy the context, so a stage that falls back anywhere in the request can mark it.
+The dict lives only for that request; nothing is carried between requests.
 """
+import contextvars
 import logging
 import sys
 
 _logger = logging.getLogger("app")
-_KNOWN_ENDPOINTS = ("/tutor", "/guard")
+_REQUEST = contextvars.ContextVar("request_info", default=None)
 
 
 def setup() -> None:
@@ -29,29 +34,53 @@ def setup() -> None:
     access.setLevel(logging.WARNING)
 
 
-def endpoint_label(path: str) -> str:
-    # The path comes from the client; only log it if it is one of ours.
-    return path if path in _KNOWN_ENDPOINTS else "other"
-
-
 def _emit(fields: dict) -> None:
     _logger.info(" ".join(f"{k}={v}" for k, v in fields.items() if v is not None))
 
 
+def start_request() -> dict:
+    info: dict = {}
+    _REQUEST.set(info)
+    return info
+
+
+def degrade(stage: str, exc: BaseException = None) -> None:
+    """Mark that a stage failed and fell back. Stage names only (e.g. "classify"); never a verdict."""
+    info = _REQUEST.get()
+    if info is None:
+        return
+    info["degraded"] = f"{info['degraded']},{stage}" if info.get("degraded") else stage
+    if exc is not None and "error" not in info:
+        info["error"] = type(exc).__name__
+
+
+def set_outcome(outcome: str) -> None:
+    info = _REQUEST.get()
+    if info is not None:
+        info["outcome"] = outcome
+
+
 def request_line(*, endpoint: str, status, latency_ms: int, body_bytes: int,
                  input_chars=None, n_msgs=None, outcome=None, degraded=None, error=None) -> None:
-    # `degraded` names a stage that failed and fell back (e.g. "classify"); never a verdict.
     _emit({"event": "request", "endpoint": endpoint, "status": status, "latency_ms": latency_ms,
            "body_bytes": body_bytes, "input_chars": input_chars, "n_msgs": n_msgs,
            "outcome": outcome, "degraded": degraded, "error": error})
 
 
-def startup_line(*, kb_sections: int, kb_chunks: int, embeddings: str, latency_ms: int) -> None:
-    # Index sizes and whether embeddings are on; never any knowledge-base text.
-    _emit({"event": "startup", "kb_sections": kb_sections, "kb_chunks": kb_chunks,
-           "embeddings": embeddings, "latency_ms": latency_ms})
+def startup_line(*, kb_sections: int, kb_chunks: int, latency_ms: int) -> None:
+    # Index sizes only; never any knowledge-base text.
+    _emit({"event": "startup", "kb_sections": kb_sections, "kb_chunks": kb_chunks, "latency_ms": latency_ms})
 
 
-def llm_line(*, kind: str, status: str, latency_ms: int, attempt: int, error=None) -> None:
+def loop_exception(loop, context) -> None:
+    """Event-loop exception handler: class name only. asyncio's default handler prints the message
+    and a traceback, and an exception message can carry API error text."""
+    exc = context.get("exception")
+    _emit({"event": "asyncio", "error": type(exc).__name__ if exc is not None else "none"})
+
+
+def llm_line(*, kind: str, status: str, latency_ms: int, attempt: int, hedge: int = 0, error=None) -> None:
+    # One line per API call. attempt = retry round (1, 2); hedge=1 marks the duplicate sent when
+    # the first call of a round is slow.
     _emit({"event": "llm", "kind": kind, "status": status, "latency_ms": latency_ms,
-           "attempt": attempt, "error": error})
+           "attempt": attempt, "hedge": hedge or None, "error": error})

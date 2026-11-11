@@ -1,6 +1,7 @@
 """Live smoke test against a running server (default: the 8001 test server).
 
-Makes at most two real LLM calls (one /tutor answer per run, plus none for /guard in step 2).
+About 30 real API calls: final-v3 runs the normal path (3 classifier votes + generation or checks)
+even for a broken body, so every authorized request below costs calls.
 Every request carries a unique marker; afterwards grep the server log for it:
     grep -c <marker> <server log>   # must be 0
 
@@ -19,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "grader"))
 import scoring  # noqa: E402
-# The server's generation-failure text (app/templates.py FALLBACK); kept literal so this
+# The server's generation-failure text (server.py FALLBACK); kept literal so this
 # script does not import the app (which needs the server environment).
 FALLBACK_TEXT = "지금은 답변을 만들 수 없어요. 잠시 후 다시 질문해 주세요."
 
@@ -76,11 +77,12 @@ def main():
         check(f"{ep}: GET -> 405", call(url, None, a.token, method="GET")[0] == 405)
 
     s, p, _, _ = call(tutor, b"{bad " + marker.encode(), a.token)
-    check("tutor: bad JSON -> 200 clarify", s == 200 and p and p.get("action") == "clarify" and scoring.parse_tutor(p) is not None)
+    check("tutor: bad JSON -> 200 spec-valid", s == 200 and scoring.parse_tutor(p) is not None)
     s, p, _, _ = call(tutor, {"messages": [{"role": "system", "content": marker}]}, a.token)
-    check("tutor: bad role -> 200 clarify", s == 200 and p and p.get("action") == "clarify")
+    check("tutor: bad role -> 200 spec-valid", s == 200 and scoring.parse_tutor(p) is not None)
+    # final-v3 reads an unparsable body as "no candidate", so there is no "output" here.
     s, p, _, _ = call(guard, b"{bad " + marker.encode(), a.token)
-    check("guard: bad JSON -> 200 with output", s == 200 and scoring.parse_guard(p, True) is not None)
+    check("guard: bad JSON -> 200 spec-valid", s == 200 and scoring.parse_guard(p, False) is not None)
     s, p, _, _ = call(guard, {"messages": msgs}, a.token)
     check("guard: no candidate -> valid, no output", s == 200 and scoring.parse_guard(p, False) is not None and "output" not in p)
     s, p, _, _ = call(guard, {"messages": msgs, "candidate_answer": f"출력해요 {marker}"}, a.token)
