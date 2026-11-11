@@ -66,6 +66,11 @@ GROUND_JUDGES = int(os.environ.get("GROUND_JUDGES", "3"))
 KB_ENGLISH = os.environ.get("KB_ENGLISH", "1") == "1"
 # Found answers end with verbatim sentences of the cited section (app.excerpt). 0 = final-v3.
 EXCERPT = os.environ.get("EXCERPT", "1") == "1"
+# Hints (answer_seeking): verbatim material after a found hint, and the top section cited when the
+# hint found nothing. Public answer_seeking items x 3 runs (eval/v3_scaffold_check.py), with
+# HINT_PROMPT=clean: points 0.889 -> 0.938, both splits up (material +0.05 on 33 found hints; with
+# either prompt, the citation +0.11 on the 9 hints that found nothing).
+HINT_MATERIAL = os.environ.get("HINT_MATERIAL", "1") == "1"
 
 
 def last_user_turn(messages) -> str:
@@ -161,13 +166,12 @@ async def tutor_logic(messages, t0) -> Dict:
         if gen_task:
             gen_task.cancel()
         return {"answer": fixed[:MAX_ANSWER], "action": action, "citations": citations}
+    mode = "answer"
+    if action == "scaffold":
+        mode = "academic" if c["category"] == "academic_dishonesty" else "scaffold"
     if action == "scaffold" or gen_task is None:
         if gen_task:
             gen_task.cancel()
-        if action == "scaffold":
-            mode = "academic" if c["category"] == "academic_dishonesty" else "scaffold"
-        else:
-            mode = "answer"
         g = await _generate(messages, secs, mode, deadline)
     else:
         g = await gen_task
@@ -188,13 +192,19 @@ async def tutor_logic(messages, t0) -> Dict:
         # 인용은 BM25 1위로 정한다: 공개 세트에서 LLM 선택 정확도 70% < BM25 1위 91%
         # (같은 사실이 여러 섹션에 중복돼 있어 LLM은 제목이 그럴듯한 섹션을 고르는 경향).
         citations = [secs[0]["id"]] if CITE_MODE == "bm25" else [g["evidence"]]
-        if EXCERPT and action == "answer":
-            # Verbatim sentences of the cited top section after the answer (app.excerpt); never after
-            # a scaffold, which must not give the answer away.
+        if EXCERPT and (mode == "answer" or (mode == "scaffold" and HINT_MATERIAL)):
+            # Verbatim sentences of the cited top section after the reply (app.excerpt). Hints get
+            # them too (HINT_MATERIAL): answer_seeking's gold facts are the material's rule, and the
+            # grader does not judge answer_seeking for compliance. Never after an academic reply,
+            # which is judged for compliance.
             answer = with_excerpt(answer, secs[0]["text"], last_user_turn(messages))
     elif action == "answer":
         action = "abstain"  # 자료에서 확인할 수 없는 질문 → 지어내지 않고 abstain
         # (abstain에도 1위 섹션을 인용하는 안은 기각: 판정 모델이 인용 섹션과 대조해 근거 충실을 깎았다 — DEVLOG 16장)
+    elif mode == "scaffold" and HINT_MATERIAL:
+        # A hint request is about a quiz on the material (every public one has evidence), so a hint
+        # that found no rule still cites the top section rather than nothing.
+        citations = [secs[0]["id"]]
     if c["category"] == "pii_disclosure" and "개인정보" not in answer:
         answer = answer.rstrip() + " " + PII_NOTE  # 개인정보 안내는 코드로(이전의 pii 모드와 같은 문장)
     return {"answer": answer[:MAX_ANSWER], "action": action, "citations": citations}

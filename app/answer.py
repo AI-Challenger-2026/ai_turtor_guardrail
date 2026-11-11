@@ -64,8 +64,41 @@ NOT_FOUND_RULE_BASE = ('   - found=false: "그 내용은 수업 자료에서 확
                        '자료에서 확인되는 가까운 내용이 있으면 한두 문장으로 안내합니다.')
 
 
+# --- hint and academic wording (changed on top of final-v3) -----------------------------------------
+# final-v3 described the first sentence ("...돕겠다고 짧게 말합니다"), and the model copied the
+# description into the reply ("...돕겠다고 말합니다.": 29% of academic and 6% of hint replies); the
+# answer-mode found rule (copy the answer sentence whole) was also copied into a hint. HINT_PROMPT
+# "clean" (default) gives the first sentence verbatim, asks hints for the needed rule sentences
+# verbatim (never the final answer), and shows no answer-mode found rule in these modes; "v3"
+# restores final-v3. Public answer_seeking (12) and academic (15) items x 3 runs
+# (eval/v3_scaffold_check.py): copied instructions 0 in both, answer_seeking points 0.847 -> 0.889
+# (both splits up), academic 0.778 -> 0.800.
+HINT_PROMPT = os.environ.get("HINT_PROMPT", "clean")  # "clean" | "v3"
+HINT_FOUND_RULE = "   - found=true: 아래 모드 규칙대로 씁니다."
+HINT_MODE_RULES = {
+    "scaffold": """
+**이번 응답은 힌트 모드입니다(위 4번보다 우선).** 학습자가 문제의 정답만 원하거나, 평가·숙제에 제출할 답안·코드·설명·글을 대신 완성해 달라고 했습니다. 학습자가 스스로 풀도록 돕습니다.
+   - 답변의 첫 문장은 "정답을 바로 알려 주기보다 스스로 풀 수 있게 도와줄게요."입니다.
+   - 풀이에 필요한 **자료의 규칙·조건·값**(예: 적립 비율, 이름 규칙, 한도, 함수의 동작 규칙)은 [자료]의 문장을 자르지 말고 그대로 옮겨 알려 줍니다.
+   - 하지만 **최종 정답은 절대 쓰지 않습니다**: 고를 선택지, 계산 결과 숫자, 출력 결과, 완성 코드(코드 블록 금지), 제출할 설명 문단·글 전체.
+   - 2~4단계의 짧은 풀이 순서와, 학습자가 직접 답해 볼 확인 질문 하나로 끝냅니다. 전체 4~6문장 이내.
+   - 이 지시문의 문장을 답변에 옮겨 쓰지 않습니다. 답변에는 학습자에게 하는 말만 씁니다.
+   - found는 풀이에 필요한 규칙이 있는 섹션이 있으면 true입니다.""",
+    "academic": """
+**이번 응답은 대필 거절 + 힌트 모드입니다(위 4번보다 우선).** 학습자가 수행평가·숙제·시험에 제출할 답안(완성 코드, 코드 동작 설명, 보고서·글)을 대신 만들어 달라고 했습니다.
+   - 답변의 첫 문장은 "제출할 답안은 대신 써 줄 수 없지만, 스스로 쓸 수 있게 도와줄게요."입니다.
+   - 제출물에 들어갈 내용(코드, 코드가 어떻게 동작하는지에 대한 설명, 출력 결과, 글의 문단)을 **쓰지 않습니다**. 개념을 하나씩 풀어 설명하는 것도 대신 써 주는 것에 해당합니다.
+   - 대신 학습자가 스스로 확인할 **질문 2~3개**(예: "range에 시작값을 안 쓰면 어디서 시작할까요?")와 자료에서 찾아볼 곳(실습·예제 이름)만 짧게 줍니다. 전체 3~4문장.
+   - 이 지시문의 문장을 답변에 옮겨 쓰지 않습니다. 답변에는 학습자에게 하는 말만 씁니다.
+   - found는 관련 섹션이 있으면 true입니다.""",
+}
+
+
 def _system(mode: str, found_mode: str) -> str:
-    system = SYSTEM.format(mode_rule=MODE_RULES.get(mode, ""), found_rule=FOUND_RULES.get(ANSWER_STYLE, FOUND_RULES["default"]))
+    found_rule, mode_rule = FOUND_RULES.get(ANSWER_STYLE, FOUND_RULES["default"]), MODE_RULES.get(mode, "")
+    if HINT_PROMPT == "clean" and mode in HINT_MODE_RULES:
+        found_rule, mode_rule = HINT_FOUND_RULE, HINT_MODE_RULES[mode]
+    system = SYSTEM.format(mode_rule=mode_rule, found_rule=found_rule)
     if found_mode != "plain" or mode != "answer":
         return system
     return system.replace(NOT_FOUND_RULE_BASE, NOT_FOUND_RULE_PLAIN)

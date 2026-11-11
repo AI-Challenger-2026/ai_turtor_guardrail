@@ -202,12 +202,45 @@ class TutorTests(ServerTestCase):
         self.assertIn(server.EXCERPT_HEAD, out["answer"])
         self.assertTrue(out["answer"].endswith(server.PII_NOTE))
 
-    def test_no_material_after_scaffold_or_abstain(self):
+    def test_found_hint_ends_with_material(self):
         self.fake.classify = {**NO_FLAGS, "answer_only": True}
-        self.assertNotIn(server.EXCERPT_HEAD, self.tutor("파이썬 리스트에 값을 추가하는 방법 정답만")["answer"])
-        self.fake.classify = dict(NO_FLAGS)
+        text = "파이썬 리스트에 값을 추가하는 방법 정답만"
+        top = server.retrieve([{"role": "user", "content": text}])[0]
+        out = self.tutor(text)
+        self.assertEqual(out["action"], "scaffold")
+        self.assertIn("\n\n" + server.EXCERPT_HEAD + " ", out["answer"])
+        self.assertEqual(out["citations"], [top["id"]])
+
+    def test_hint_without_rule_still_cites_top_section(self):
+        self.fake.classify = {**NO_FLAGS, "answer_only": True}
         self.fake.generate = lambda user, system: {"evidence": "NONE", "found": False, "answer": "자료에서 확인할 수 없어요."}
+        text = "파이썬 리스트에 값을 추가하는 방법 정답만"
+        out = self.tutor(text)
+        self.assertEqual(out["action"], "scaffold")
+        self.assertEqual(out["citations"], [server.retrieve([{"role": "user", "content": text}])[0]["id"]])
+        self.assertNotIn(server.EXCERPT_HEAD, out["answer"])
+
+    def test_no_material_after_academic_or_abstain(self):
+        self.fake.classify = {**NO_FLAGS, "submit_work": True}
+        out = self.tutor("수행평가에 낼 리스트 코드 전부 완성해 줘")
+        self.assertEqual(out["action"], "scaffold")
+        self.assertNotIn(server.EXCERPT_HEAD, out["answer"])
+        self.fake.generate = lambda user, system: {"evidence": "NONE", "found": False, "answer": "자료에서 확인할 수 없어요."}
+        self.assertEqual(self.tutor("수행평가에 낼 리스트 코드 전부 완성해 줘")["citations"], [])
+        self.fake.classify = dict(NO_FLAGS)
         self.assertNotIn(server.EXCERPT_HEAD, self.tutor("파이썬 리스트에 값을 추가하는 방법")["answer"])
+
+    def test_hint_material_switch_off_restores_final_v3(self):
+        self.fake.classify = {**NO_FLAGS, "answer_only": True}
+        orig = server.HINT_MATERIAL
+        server.HINT_MATERIAL = False
+        try:
+            out = self.tutor("파이썬 리스트에 값을 추가하는 방법 정답만")
+            self.assertNotIn(server.EXCERPT_HEAD, out["answer"])
+            self.fake.generate = lambda user, system: {"evidence": "NONE", "found": False, "answer": "자료에서 확인할 수 없어요."}
+            self.assertEqual(self.tutor("파이썬 리스트에 값을 추가하는 방법 정답만")["citations"], [])
+        finally:
+            server.HINT_MATERIAL = orig
 
     def test_answer_is_capped(self):
         self.fake.generate = lambda user, system: {"evidence": SECTION_ID.search(user).group(1), "found": True,
@@ -275,6 +308,37 @@ class FoundModeTests(unittest.TestCase):
         self.assertNotEqual(plain, base)
         for mode in ("scaffold", "academic"):
             self.assertEqual(answer._system(mode, "plain"), answer._system(mode, "model"))
+
+
+class HintPromptTests(unittest.TestCase):
+    """app.answer HINT_PROMPT (added on top of final-v3)."""
+
+    def setUp(self):
+        self._prompt = answer.HINT_PROMPT
+
+    def tearDown(self):
+        answer.HINT_PROMPT = self._prompt
+
+    def test_default_is_clean(self):
+        self.assertEqual(answer.HINT_PROMPT, "clean")
+
+    def test_clean_gives_first_sentence_and_hides_answer_rule(self):
+        answer_rule = answer.FOUND_RULES[answer.ANSWER_STYLE]
+        for mode, first in (("scaffold", "정답을 바로 알려 주기보다 스스로 풀 수 있게 도와줄게요."),
+                            ("academic", "제출할 답안은 대신 써 줄 수 없지만, 스스로 쓸 수 있게 도와줄게요.")):
+            system = answer._system(mode, "plain")
+            self.assertIn(f'"{first}"', system)
+            self.assertNotIn(answer_rule, system)
+            self.assertNotIn("짧게 말합니다", system)
+            self.assertIn("힌트 모드", system)  # tests.Fake routes hint prompts by this phrase
+        self.assertIn(answer_rule, answer._system("answer", "plain"))  # answer mode unchanged
+
+    def test_v3_restores_final_v3(self):
+        answer.HINT_PROMPT = "v3"
+        for mode in ("scaffold", "academic"):
+            system = answer._system(mode, "plain")
+            self.assertIn(answer.MODE_RULES[mode], system)
+            self.assertIn(answer.FOUND_RULES[answer.ANSWER_STYLE], system)
 
 
 class JuryTests(unittest.TestCase):
