@@ -126,22 +126,12 @@ async def embed_async(text: str) -> np.ndarray:
 
 
 class KB:
-    def __init__(self, use_embeddings: bool = True, expand: Optional[str] = None):
-        """expand: 색인에 덧붙일 확장 종류("ko_questions,en_terms,en_questions" 중 쉼표로). None이면 환경변수 KB_EXPAND(기본 없음).
-        확장은 scripts/build_expansion.py가 KB 본문으로 만든 kb_expansion.json(DEVLOG 22장)."""
+    def __init__(self, use_embeddings: bool = True):
         self.secs = load_sections()
         self.chunks = make_chunks(self.secs)
         self.chunk_sids = [c["sid"] for c in self.chunks]
         self.sids = list(self.secs)
-        kinds = [k for k in (os.environ.get("KB_EXPAND", "") if expand is None else expand).split(",") if k]
-        docs = [c["text"] for c in self.chunks]
-        if kinds:
-            exp = json.loads((KB_DIR.parent / "kb_expansion.json").read_text(encoding="utf-8"))
-            ordn = defaultdict(int)
-            for i, c in enumerate(self.chunks):
-                e = exp.get(f"{c['sid']}#{ordn[c['sid']]}", {}); ordn[c["sid"]] += 1
-                docs[i] += "\n" + "\n".join(x for k in kinds for x in e.get(k, []))
-        self.bm25 = BM25(docs)
+        self.bm25 = BM25([c["text"] for c in self.chunks])
         self.emb = self._load_or_build_emb() if use_embeddings else None
 
     def _load_or_build_emb(self) -> np.ndarray:
