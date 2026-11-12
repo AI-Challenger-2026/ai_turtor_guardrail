@@ -3,6 +3,7 @@
 - 구간은 후보 답변에서 그대로 옮긴 문자열이어야 한다(채점은 문자 단위 F1, 공백·문장부호 무시).
 - LLM이 낸 구간 중 후보 답변에 실제로 들어 있지 않은 것은 버린다(지어낸 구간 방지).
 """
+import asyncio
 import re
 from typing import Dict, List
 
@@ -65,10 +66,12 @@ def render(messages: List[Dict[str, str]]) -> str:
     return "\n".join(f"{'학습자' if m.get('role') == 'user' else '튜터'}: {m.get('content', '')}" for m in messages)
 
 
-async def find_unsupported(messages, candidate: str, sections: List[Dict[str, str]], deadline=None) -> List[str]:
+async def find_unsupported(messages, candidate: str, sections: List[Dict[str, str]], deadline=None,
+                           hedge_after=9.0) -> List[str]:
     ctx = "\n\n".join(f"<섹션 id=\"{s['id']}\" 제목=\"{s['title']}\">\n{s['text']}\n</섹션>" for s in sections)
     user = f"[자료]\n{ctx}\n\n[대화]\n{render(messages)}\n\n[후보 답변]\n{candidate}"
-    out = await chat_json(SYSTEM, user, effort="low", max_tokens=2000, timeout=20, deadline=deadline, hedge_after=9.0)
+    out = await chat_json(SYSTEM, user, effort="low", max_tokens=2000, timeout=20, deadline=deadline,
+                          hedge_after=hedge_after, kind="ground")
     spans = []
     for c in out.get("claims") or []:
         if not isinstance(c, dict) or c.get("verdict") not in ("contradict", "absent"):
@@ -83,3 +86,43 @@ async def find_unsupported(messages, candidate: str, sections: List[Dict[str, st
                 and not _is_non_claim(candidate, s):
             keep.append(s.strip())
     return keep
+
+
+async def find_unsupported_jury(messages, candidate: str, sections: List[Dict[str, str]], deadline=None,
+                                judges: int = 3) -> List[str]:
+    """Majority of `judges` independent verifier calls sent at once (no hedging: the jury is the
+    redundancy). A failed judge counts as "grounded", as a failed single verifier does in the server.
+    Once more than half agree, the rest are cancelled (with three judges, two that agree decide).
+    Flagged by the majority -> the spans of the first flagging judge in launch order; otherwise [].
+    Raises if every judge failed (the server then keeps the candidate grounded and marks it degraded).
+
+    Chosen offline on 67 public allow items with a candidate, 6 samples each: candidate-output
+    score 0.929 (single) -> 0.938 (this rule), higher on both splits, grounded answers never flagged.
+    """
+    tasks = [asyncio.ensure_future(find_unsupported(messages, candidate, sections, deadline=deadline, hedge_after=None))
+             for _ in range(judges)]
+
+    def answers():
+        # Verdicts of the judges that answered, in launch order. Failed judges are left out here
+        # (so they never trigger the early decision) and count as "grounded" in the final count.
+        return [t.result() for t in tasks if t.done() and not t.cancelled() and t.exception() is None]
+
+    try:
+        pending = set(tasks)
+        while pending:
+            _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            got = answers()
+            flagged = sum(bool(a) for a in got)
+            if 2 * max(flagged, len(got) - flagged) > judges:
+                break
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+            elif not t.cancelled():
+                t.exception()  # collected so asyncio never prints it
+    got = answers()
+    if not got:
+        raise RuntimeError("all judges failed")
+    flagged = [a for a in got if a]
+    return flagged[0] if 2 * len(flagged) > judges else []

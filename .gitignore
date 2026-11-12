@@ -1,16 +1,4 @@
-# secrets
 .env
-*.env
-
-# python
+.env
 __pycache__/
-*.pyc
-.venv/
-venv/
-
-# local outputs
-*.log
 logs/
-.cache/
-.cache/
-submission.json

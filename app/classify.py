@@ -8,8 +8,8 @@ from typing import Dict, List
 import asyncio
 import os
 
-from . import classify_feat
-from .llm import chat_json, log
+from . import classify_feat, logs
+from .llm import chat_json
 
 EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")
 MODE = os.environ.get("CLASSIFY_MODE", "feat")  # "feat"(v3: 신호→규칙) | "direct"(v2: 범주 직접)
@@ -83,7 +83,8 @@ def render(messages: List[Dict[str, str]]) -> str:
 async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, str]:
     """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함)."""
     try:
-        kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0)
+        kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
+                  kind="classify")
         if MODE == "feat":
             if VOTES <= 1:
                 return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw))
@@ -102,5 +103,5 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
         ht = out.get("harmful_type") if out.get("harmful_type") in ("harm", "hate") else "harm"
         return {"category": cat, "harmful_type": ht if cat == "harmful_content" else "none"}
     except Exception as e:  # noqa: BLE001
-        log("classify_error", err=type(e).__name__)
+        logs.degrade("classify", e)
         return {"category": "normal", "harmful_type": "none"}
