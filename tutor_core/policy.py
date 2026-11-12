@@ -12,7 +12,7 @@ from .retrieval import Retriever, SearchHit, SearchResult
 from .schemas import Action, Category, InputAssessment, Message, ResponseModel
 
 
-POLICY_VERSION = "input-v2"
+POLICY_VERSION = "input-v3"
 HarmfulKind = Literal["none", "actionable", "denigration"]
 MaterialStatus = Literal["supported", "missing", "unclear", "not_applicable"]
 BLOCKED = frozenset({"academic_dishonesty", "off_topic", "jailbreak_injection", "harmful_content"})
@@ -43,6 +43,27 @@ class IntentSignals(ResponseModel):
 class MaterialAnalysis(ResponseModel):
     coverage: Literal["supported", "general_explanation", "missing_course_fact", "uncertain"]
     supporting_ids: list[str]
+
+
+def apply_material(analysis: InputAnalysis, coverage: str) -> InputAnalysis:
+    """자료 범위가 위험·대행·자기 공개 등 먼저 확인한 입력 의도를 덮지 않게 한다."""
+    if analysis.category != "normal":
+        return analysis
+    if coverage not in ("supported", "general_explanation", "missing_course_fact", "uncertain"):
+        raise ValueError("invalid_material_coverage")
+    return InputAnalysis(
+        category="out_of_material" if coverage == "missing_course_fact" else "normal", harmful_kind="none",
+        material_status="missing" if coverage == "missing_course_fact" else "unclear" if coverage == "uncertain" else "supported",
+    )
+
+
+def valid_material(material: MaterialAnalysis, provided: set[str]) -> bool:
+    """실제 전달한 원문의 근거와 범위 판정이 서로 일치하는지 확인한다."""
+    if not set(material.supporting_ids).issubset(provided):
+        return False
+    if material.coverage == "supported" and not material.supporting_ids:
+        return False
+    return not (material.coverage == "missing_course_fact" and material.supporting_ids)
 
 
 def analyze_intent(signals: IntentSignals) -> InputAnalysis:
@@ -143,7 +164,7 @@ class InputPolicy:
                 seconds=remaining(), max_tokens=2000,
             )
             provided = set(found.section_ids[:8])
-            invalid = any(section_id not in provided for section_id in material.supporting_ids)
+            invalid = not valid_material(material, provided)
             if remaining() >= 6.0 and (invalid or (material.coverage in ("missing_course_fact", "uncertain") and len(found.hits) > 8)):
                 self.counters["evidence_expansions"] += 1
                 hits = list(found.hits[:8])
@@ -154,18 +175,14 @@ class InputPolicy:
                     if hit.section.section_id not in {item.section.section_id for item in hits} and len(hits) < 12:
                         hits.append(hit)
                 found = SearchResult(tuple(hits), found.mode, found.degraded, found.failure_reason)
+                provided = set(found.section_ids)
                 material = await self.clients.complete_json(
                     self._material_messages(messages, found, 12), MaterialAnalysis, budget,
                     seconds=remaining(), max_tokens=2000,
                 )
-            if any(section_id not in found.section_ids for section_id in material.supporting_ids):
+            if not valid_material(material, provided):
                 raise ProviderFailure("invalid_policy_evidence")
-            missing = material.coverage == "missing_course_fact"
-            analysis = InputAnalysis(
-                category="out_of_material" if missing else "normal", harmful_kind="none",
-                material_status="missing" if missing else "unclear" if material.coverage == "uncertain" else "supported",
-            )
-            return map_policy(analysis)
+            return map_policy(apply_material(analysis, material.coverage))
 
         try:
             result = await budget.run(classify_with_evidence, remaining())

@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from .llm import ApiClients, ProviderFailure, RequestBudget
-from .policy import InputAnalysis, IntentSignals, PolicyResult, analyze_intent, map_policy
-from .prompts import TUTOR_SYSTEM
+from .policy import IntentSignals, PolicyResult, analyze_intent, apply_material, map_policy
+from .prompts import TUTOR_REPAIR_SYSTEM, TUTOR_SYSTEM
 from .retrieval import Retriever, SearchResult
 from .schemas import ResponseModel, TutorRequest, TutorResponse
 from .validation import unavailable_tutor
@@ -17,6 +17,11 @@ from .verifier import OutputVerifier, VerificationResult
 class TutorDraft(ResponseModel):
     signals: IntentSignals
     coverage: Literal["supported", "general_explanation", "missing_course_fact", "uncertain"]
+    answer: str
+    citations: list[str]
+
+
+class TutorRevision(ResponseModel):
     answer: str
     citations: list[str]
 
@@ -68,19 +73,12 @@ class TutorService:
         }
         if notes is not None:
             data["repair_notes"] = notes
-        return [{"role": "system", "content": TUTOR_SYSTEM},
+        return [{"role": "system", "content": TUTOR_REPAIR_SYSTEM if notes is not None else TUTOR_SYSTEM},
                 {"role": "user", "content": json.dumps(data, ensure_ascii=False)}]
 
     @staticmethod
     def _policy(draft: TutorDraft) -> PolicyResult:
-        analysis = analyze_intent(draft.signals)
-        if analysis.category == "normal":
-            missing = draft.coverage == "missing_course_fact"
-            analysis = InputAnalysis(
-                category="out_of_material" if missing else "normal", harmful_kind="none",
-                material_status="missing" if missing else "unclear" if draft.coverage == "uncertain" else "supported",
-            )
-        return map_policy(analysis)
+        return map_policy(apply_material(analyze_intent(draft.signals), draft.coverage))
 
     @staticmethod
     def _valid(draft: TutorDraft, checked: VerificationResult, policy: PolicyResult, found: SearchResult) -> bool:
@@ -124,44 +122,71 @@ class TutorService:
     async def handle(self, request: TutorRequest, budget: RequestBudget) -> TutorOutcome:
         self.counters["requests"] += 1
         try:
+            settings = self.clients.settings
             found = await self.retriever.search(request.messages, budget, top_k=12)
+            draft_seconds = budget.available_for(
+                settings.draft_timeout, reserve=settings.verification_reserve + settings.response_margin,
+            )
+            if draft_seconds <= 0:
+                raise ProviderFailure("insufficient_verification_budget")
             draft = await self.clients.complete_json(
                 self._messages(request, found), TutorDraft, budget,
-                seconds=self.clients.settings.draft_timeout, max_tokens=2000,
+                seconds=draft_seconds, max_tokens=2000,
             )
             policy = self._policy(draft)
             if policy.assessment.category in SAFE_RESPONSES and policy.assessment.category != "answer_seeking":
                 return self._protected(policy)
             checked = await self.verifier.verify(
                 request.messages, draft.answer, budget, evidence=found, citations=draft.citations,
-                expected_action=policy.action, seconds=self.clients.settings.tutor_verification_timeout,
+                expected_action=policy.action,
+                seconds=budget.available_for(settings.tutor_verification_timeout, reserve=settings.response_margin),
             )
             protected = self._review_protection(checked, policy)
             if protected is not None:
                 return protected
+            # 근거 표현만 잘못됐고 안전·정책은 확인된 경우 같은 답변을 한 번 재검토한다.
+            can_recheck = (
+                checked.evidence_issues and checked.claimed_grounded is True
+                and checked.safety_verified and checked.output.safe and checked.policy_compliant
+                and checked.policy is not None and checked.policy.verified
+            )
+            recheck_seconds = budget.available_for(settings.recheck_timeout, reserve=settings.response_margin)
+            if can_recheck and budget.chat_calls + 1 <= budget.max_chat_calls and recheck_seconds >= settings.minimum_recheck_seconds:
+                self.counters["verification_retries"] += 1
+                checked = await self.verifier.recheck(
+                    request.messages, draft.answer, budget, previous=checked, seconds=recheck_seconds,
+                )
+                protected = self._review_protection(checked, policy)
+                if protected is not None:
+                    return protected
             if not self._valid(draft, checked, policy, found):
-                # 남은 시간과 호출 수를 모두 확인한 뒤 보정·재검증을 한 번씩만 허용한다.
-                if budget.remaining() < 9 or budget.chat_calls + 2 > budget.max_chat_calls:
+                # 원문 구간·근거 판정 자체가 실패한 지적으로 새 답변을 만들지 않는다.
+                if not checked.verified:
                     raise ProviderFailure(checked.failure_reason or "unverified_tutor_draft")
+                # 보정 뒤 독립 검증까지 마칠 시간과 호출 수가 있어야 생성한다.
+                repair_seconds = budget.available_for(
+                    settings.repair_timeout, reserve=settings.verification_reserve + settings.response_margin,
+                )
+                if repair_seconds < settings.minimum_repair_seconds or budget.chat_calls + 2 > budget.max_chat_calls:
+                    raise ProviderFailure("insufficient_repair_budget")
                 self.counters["repairs"] += 1
                 found = checked.evidence or found
                 notes = {"previous_answer": draft.answer, "unsupported": checked.output.unsupported,
                          "allowed_citations": list(found.section_ids), "max_characters": 4000,
                          "required_action": policy.action, "grounded": checked.output.grounded,
                          "verification_completed": checked.verified, "policy_compliant": checked.policy_compliant}
-                draft = await self.clients.complete_json(
-                    self._messages(request, found, notes), TutorDraft, budget,
-                    seconds=self.clients.settings.repair_timeout, max_tokens=2000,
+                revision = await self.clients.complete_json(
+                    self._messages(request, found, notes), TutorRevision, budget,
+                    seconds=repair_seconds, max_tokens=2000,
                 )
-                repaired_policy = self._policy(draft)
-                if repaired_policy.assessment.category in SAFE_RESPONSES and repaired_policy.assessment.category != "answer_seeking":
-                    return self._protected(repaired_policy)
-                # 재생성 모델이 learning으로 바꿔도 처음의 정답 보호 결정을 완화하지 않는다.
-                if repaired_policy.action == "scaffold":
-                    policy = repaired_policy
+                # 보정 출력에는 의도·범위가 없어 최초 보호 행동을 바꿀 수 없다.
+                draft = TutorDraft(signals=draft.signals, coverage=draft.coverage,
+                                   answer=revision.answer, citations=revision.citations)
                 checked = await self.verifier.verify(
                     request.messages, draft.answer, budget, evidence=found, citations=draft.citations,
-                    expected_action=policy.action, seconds=self.clients.settings.repair_timeout, search_candidate=False,
+                    expected_action=policy.action,
+                    seconds=budget.available_for(settings.tutor_verification_timeout, reserve=settings.response_margin),
+                    search_candidate=False,
                 )
                 protected = self._review_protection(checked, policy)
                 if protected is not None:

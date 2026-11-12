@@ -10,8 +10,8 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from harness.score_local import WEIGHTS, as_scoring_input
-from scoring import aggregate, block_f1, guard_points, score_guard, score_tutor, span_f1, tutor_points
+from harness.score_local import ATTACK_CATEGORIES, WEIGHTS, as_scoring_input
+from scoring import CONTENT_ACTIONS, aggregate, block_f1, guard_points, score_guard, score_tutor, span_f1, tutor_points
 from tutor_core.knowledge import load_knowledge
 from tutor_core.schemas import GuardResponse, TutorResponse
 
@@ -36,7 +36,7 @@ def latency_summary(values):
             "max": round(ordered[-1], 3)}
 
 
-def observe_public(item, parsed):
+def observe_public(item, parsed, scored=None):
     """공개 라벨과 응답에서 본문 없는 관측값만 추출한다."""
     labels = item["labels"]
     base = {"id": item["id"], "endpoint": item["endpoint"], "valid": parsed is not None}
@@ -45,7 +45,12 @@ def observe_public(item, parsed):
         citations = set(parsed.citations) if parsed is not None else set()
         overlap = len(evidence & citations)
         citation_f1 = 2 * overlap / (len(evidence) + len(citations)) if evidence else None
-        return {**base, "action_correct": parsed is not None and parsed.action == labels["action"], "citation_f1": citation_f1}
+        scored = scored or {}
+        return {**base, "action_correct": parsed is not None and parsed.action == labels["action"], "citation_f1": citation_f1,
+                "facts_expected": bool(labels.get("gold_facts")), "facts_score": scored.get("facts"),
+                "faithfulness_expected": labels["action"] in CONTENT_ACTIONS, "faithful": scored.get("faithful"),
+                "compliance_expected": labels.get("category") in ATTACK_CATEGORIES, "complied": scored.get("complied"),
+                "judge_error": scored.get("judge_error"), "over_refusal": scored.get("over_refusal")}
     converted, variant = as_scoring_input(item)
     score = score_guard(converted, variant, parsed.model_dump(exclude_none=True) if parsed else None)
     output = parsed.output if parsed else None
@@ -71,6 +76,16 @@ def public_metrics(observations):
             "tutor_evidence_count": len(citations), "non_normal_count": len(categories),
             "tutor_action_accuracy": mean([row["action_correct"] for row in tutor]),
             "tutor_citation_f1": mean(citations), "guard_block_f1": block_f1(scored),
+            "tutor_facts_score": mean([row["facts_score"] for row in tutor if row.get("facts_score") is not None]),
+            "tutor_faithfulness_rate": mean([row["faithful"] for row in tutor if row.get("faithful") is not None]),
+            "tutor_attack_compliance_rate": mean([row["complied"] for row in tutor if row.get("complied") is not None]),
+            "tutor_judge_coverage": {
+                name: {"expected": sum(bool(row.get(expected)) for row in tutor),
+                       "eligible": sum(bool(row.get(expected)) and row["valid"] for row in tutor),
+                       "observed": sum(row.get(value) is not None for row in tutor)}
+                for name, expected, value in (("facts", "facts_expected", "facts_score"),
+                                              ("faithful", "faithfulness_expected", "faithful"),
+                                              ("complied", "compliance_expected", "complied"))},
             "guard_non_normal_category_accuracy": mean([row["category_correct"] for row in categories]),
             "grounded_accuracy": mean([row["grounded_correct"] for row in outputs]),
             "safe_accuracy": mean([row["safe_correct"] for row in outputs]),
@@ -95,7 +110,7 @@ def release_targets(result):
             "operational": result["operational_pass"]}
 
 
-def call_endpoint(client, endpoint, messages, *, candidate=None, has_candidate=False):
+def call_endpoint(client, endpoint, messages, *, candidate=None, has_candidate=False, diagnostics=None):
     from tools.evaluate import bounded_json
 
     payload = {"spec_version": "1.0", "session_id": "check_" + secrets.token_hex(8), "messages": messages}
@@ -104,6 +119,9 @@ def call_endpoint(client, endpoint, messages, *, candidate=None, has_candidate=F
     start = time.monotonic()
     try:
         with client.stream("POST", "/" + endpoint, json=payload) as response:
+            if diagnostics is not None:
+                from tools.evaluation_trace import HEADER, decode_trace
+                diagnostics.append(decode_trace(response.headers.get(HEADER)))
             value = bounded_json(response)
         parsed = (TutorResponse if endpoint == "tutor" else GuardResponse).model_validate(value)
         if endpoint == "guard" and (parsed.output is not None) != has_candidate:
@@ -124,17 +142,20 @@ def counter_delta(before, after, name="degraded_responses"):
     return delta
 
 
-def score_public_cases(public, client, judge, kb, workers):
+def score_public_cases(public, client, judge, kb, workers, *, diagnostics=False, checkpoint=None):
     """문항을 직접 배정하고 주최측 채점 함수에 응답을 전달한다. 본문은 반환하지 않는다."""
     lock = threading.Lock()
     completed = 0
+    endpoint_counts = Counter()
 
     def one(item):
         nonlocal completed
         endpoint = item["endpoint"]
+        traces = []
+        extra = {"diagnostics": traces} if diagnostics else {}
         parsed, elapsed, error = call_endpoint(
             client, endpoint, item["messages"], candidate=item.get("candidate_answer"),
-            has_candidate="candidate_answer" in item,
+            has_candidate="candidate_answer" in item, **extra,
         )
         converted, variant = as_scoring_input(item)
         response = parsed.model_dump(exclude_none=True) if parsed is not None else None
@@ -144,13 +165,21 @@ def score_public_cases(public, client, judge, kb, workers):
         else:
             scored = score_guard(converted, variant, response)
             points = guard_points(scored)
-        observed = observe_public(item, parsed)
+        observed = observe_public(item, parsed, scored)
+        diagnosis = None
+        if diagnostics:
+            from tools.public_diagnostics import diagnose_case
+            diagnosis = diagnose_case(item, parsed, scored, observed, traces[0] if len(traces) == 1 else None)
         with lock:
             completed += 1
+            endpoint_counts[endpoint] += 1
             if completed % 25 == 0:
                 print(f"공개 문항 {completed}/{len(public)}건 처리", flush=True)
+                if checkpoint is not None:
+                    checkpoint({"completed": completed, "total": len(public), "endpoint_counts": dict(endpoint_counts)})
         return {"id": item["id"], "endpoint": endpoint, "category": item["labels"]["category"],
-                "scored": scored, "points": points, "observed": observed, "elapsed": elapsed, "error": error}
+                "scored": scored, "points": points, "observed": observed, "elapsed": elapsed, "error": error,
+                "diagnosis": diagnosis}
 
     with ThreadPoolExecutor(workers) as executor:
         rows = list(executor.map(one, public))
@@ -166,10 +195,14 @@ def score_public_cases(public, client, judge, kb, workers):
                               for endpoint, categories in per_category.items()},
              "items": [{"id": row["id"], "endpoint": row["endpoint"], "category": row["category"],
                         "points": round(100 * row["points"], 1), "valid": row["scored"]["valid"]} for row in rows]}
-    return {"score": score, "metrics": public_metrics([row["observed"] for row in rows]),
+    result = {"score": score, "metrics": public_metrics([row["observed"] for row in rows]),
             "endpoint_errors": dict(Counter(row["endpoint"] for row in rows if row["error"])),
             "server_latency_seconds": latency_summary([row["elapsed"] for row in rows]),
             "deadline_violations": sum(row["elapsed"] >= 30 for row in rows)}
+    if diagnostics:
+        from tools.public_diagnostics import summarize_diagnostics
+        result["diagnostics"] = summarize_diagnostics(rows)
+    return result
 
 
 def evaluate_smoke(client, kb_root: Path, workers: int) -> dict:

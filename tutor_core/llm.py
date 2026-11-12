@@ -43,6 +43,10 @@ class RequestBudget:
     def remaining(self) -> float:
         return max(0.0, self.expires_at - time.monotonic())
 
+    def available_for(self, ceiling: float, *, reserve: float = 0.0) -> float:
+        """후속 검증과 응답에 남길 시간을 제외한 현재 단계의 상한을 구한다."""
+        return max(0.0, min(ceiling, self.remaining() - max(0.0, reserve)))
+
     def claim_chat(self) -> None:
         if self.chat_calls >= self.max_chat_calls:
             raise ProviderFailure("call_budget_exhausted")

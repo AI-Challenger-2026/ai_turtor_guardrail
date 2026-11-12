@@ -16,7 +16,7 @@ from tests.test_foundation import ProtocolDouble, SETTINGS
 from tutor_core.embedding_cache import EmbeddingCache, normalize_vector
 from tutor_core.knowledge import KnowledgeBase, KnowledgeError, KnowledgeSection, load_knowledge
 from tutor_core.llm import ProviderFailure, RequestBudget
-from tutor_core.retrieval import Retriever, SearchConfig, SearchQueries, prepare_retriever
+from tutor_core.retrieval import Retriever, SearchConfig, SearchHit, SearchQueries, SearchResult, _embedding_input, bounded_excerpt, merge_evidence, prepare_retriever
 from tutor_core.schemas import Message
 
 
@@ -202,6 +202,83 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.section_ids, tuple(sorted(self.kb.by_id)))
         self.assertEqual(first.section_ids, second.section_ids)
 
+    async def test_long_request_tail_is_retrieved_without_losing_front_context(self):
+        text = "앞의 배경 단서\n" + "배경자료 " * 4000 + "\nbeta 조건문을 설명해 줘."
+        queries = SearchQueries.from_messages([Message(role="user", content=text)])
+        self.assertLessEqual(len(queries.latest), 12000)
+        self.assertTrue(queries.latest.startswith("앞의 배경 단서"))
+        self.assertTrue(queries.latest.endswith("beta 조건문을 설명해 줘."))
+        self.assertEqual(self.retriever.lexical([Message(role="user", content=text)], top_k=1).section_ids, ("PY-01-02",))
+
+    async def test_oversize_assistant_does_not_erase_previous_user_clue(self):
+        messages = [Message(role="user", content="alpha 반복문"), Message(role="assistant", content="긴 배경 " * 10000),
+                    Message(role="user", content="그 개념을 설명해 줘.")]
+        queries = SearchQueries.from_messages(messages)
+        self.assertIn("alpha", queries.history)
+        self.assertLessEqual(len(queries.history), 24000)
+        self.assertEqual(self.retriever.lexical(messages, top_k=1).section_ids, ("PY-01-01",))
+
+    async def test_short_queries_preserve_existing_text(self):
+        messages = [Message(role="user", content="alpha"), Message(role="assistant", content="이전 설명"), Message(role="user", content=" beta ")]
+        queries = SearchQueries.from_messages(messages)
+        self.assertEqual((queries.latest, queries.history), ("beta", "alpha\n이전 설명"))
+        self.assertEqual(_embedding_input("  alpha\n조건문  "), "alpha\n조건문")
+
+
+class EvidenceSelectionTests(unittest.TestCase):
+    def knowledge(self):
+        sections = tuple(KnowledgeSection(f"PY-01-{index:02d}", "자료", f"원문 조건 {index}\n```csv\n이름,한도\n가상,{index}\n```", (), ())
+                         for index in range(1, 21))
+        return KnowledgeBase(sections, "b" * 64, 20, 0)
+
+    def test_many_citations_cannot_erase_both_question_and_claim_sources(self):
+        kb = self.knowledge()
+        question = SearchResult(tuple(SearchHit(section, 1) for section in kb.sections[12:16]), "test")
+        claims = SearchResult(tuple(SearchHit(section, 1) for section in kb.sections[16:20]), "test")
+        result = merge_evidence(kb, question, claims, tuple(section.section_id for section in kb.sections[:12]))
+        self.assertEqual(len(result.hits), 12)
+        self.assertEqual(len(set(result.section_ids)), 12)
+        self.assertEqual(dict(result.source_coverage), {"citation": 4, "question": 4, "claim": 4})
+        self.assertTrue(all(hit.section is kb.by_id[hit.section.section_id] for hit in result.hits))
+        self.assertTrue(all("이름,한도" in hit.section.text for hit in result.hits))
+        self.assertEqual(result.context_characters, sum(len(hit.section.text) for hit in result.hits))
+
+    def test_question_padding_does_not_inflate_verification_context(self):
+        kb = self.knowledge()
+        question = SearchResult(tuple(SearchHit(section, 1) for section in kb.sections[:12]), "test")
+        claims = SearchResult(question.hits[:8], "test")
+        result = merge_evidence(kb, question, claims, (kb.sections[0].section_id,))
+        self.assertEqual(result.section_ids, tuple(section.section_id for section in kb.sections[:8]))
+        self.assertEqual(dict(result.source_coverage), {"citation": 1, "question": 8, "claim": 8})
+
+    def test_sufficient_space_preserves_original_priority_order(self):
+        kb = self.knowledge()
+        question = SearchResult(tuple(SearchHit(section, 1) for section in kb.sections[:6]), "test")
+        claims = SearchResult(tuple(SearchHit(section, 1) for section in kb.sections[4:10]), "test")
+        result = merge_evidence(kb, question, claims, (kb.sections[1].section_id, kb.sections[4].section_id))
+        expected = (1, 4, 0, 2, 3, 5, 6, 7, 8, 9)
+        self.assertEqual(result.section_ids, tuple(kb.sections[index].section_id for index in expected))
+
+    def test_duplicates_unknown_ids_and_degradation_are_preserved_correctly(self):
+        kb = self.knowledge()
+        found = SearchResult((SearchHit(kb.sections[0], 1),), "test", True, "upstream_timeout")
+        result = merge_evidence(kb, found, found, ("UNKNOWN", kb.sections[0].section_id, kb.sections[0].section_id))
+        self.assertEqual(result.section_ids, (kb.sections[0].section_id,))
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.failure_reason, "upstream_timeout")
+        self.assertEqual(dict(result.source_coverage), {"citation": 1, "question": 1, "claim": 1})
+        for limit in (0, 13, True):
+            with self.assertRaises(ValueError):
+                merge_evidence(kb, found, found, limit=limit)
+
+    def test_embedding_byte_limit_keeps_both_utf8_ends(self):
+        result = _embedding_input("앞머리 단서\n" + "한글🧩" * 8000 + "\n끝의 실제 요청")
+        self.assertLessEqual(len(result.encode("utf-8")), 7500)
+        self.assertTrue(result.startswith("앞머리 단서"))
+        self.assertTrue(result.endswith("끝의 실제 요청"))
+        self.assertNotIn("\ufffd", result)
+        self.assertEqual(bounded_excerpt("가나다라마바사", 0), "")
+
 
 class PreparationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -238,6 +315,19 @@ class PreparationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProviderFailure):
             await prepare_retriever(client, kb_root=self.root / "kb", cache_path=path)
         self.assertFalse(path.exists())
+
+    async def test_evaluation_baseline_reuses_same_static_cache_and_original_factory_stays_default(self):
+        from tools.search_baseline_server import LegacyRetriever
+
+        client = EmbeddingDouble()
+        kwargs = {"kb_root": self.root / "kb", "cache_path": self.root / "cache" / "kb.json"}
+        current = await prepare_retriever(client, **kwargs)
+        previous = await prepare_retriever(client, retriever_class=LegacyRetriever, **kwargs)
+        self.assertIs(type(current), Retriever)
+        self.assertIs(type(previous), LegacyRetriever)
+        self.assertEqual(previous.cache_state, "hit")
+        self.assertEqual(previous.vectors, current.vectors)
+        self.assertEqual(client.counters["embedding_attempts"], 1)
 
     async def test_server_does_not_become_ready_before_index_preparation(self):
         entered, release = asyncio.Event(), asyncio.Event()

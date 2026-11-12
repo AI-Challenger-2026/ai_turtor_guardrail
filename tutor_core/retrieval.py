@@ -44,9 +44,26 @@ def gram_tokens(text: str) -> list[str]:
     return [word[index:index + 2] for word in HANGUL.findall(unicodedata.normalize("NFKC", text)) for index in range(len(word) - 1)]
 
 
+def bounded_excerpt(text: str, limit: int) -> str:
+    """검색용 문자열의 앞·뒤를 함께 보존하고 문자 수 상한을 지킨다."""
+    if len(text) <= limit:
+        return text
+    marker = "\n...\n"
+    if limit <= len(marker):
+        return text[-limit:] if limit > 0 else ""
+    head = (limit - len(marker)) // 2
+    return text[:head] + marker + text[-(limit - len(marker) - head):]
+
+
 def _embedding_input(text: str) -> str:
-    # 토큰 하나는 적어도 한 바이트를 쓰므로 UTF-8 바이트 제한으로 입력 한도에 여유를 둔다.
-    return text.encode("utf-8", errors="replace")[:7500].decode("utf-8", errors="ignore").strip()
+    # UTF-8 바이트 한도 안에서 앞의 맥락과 뒤의 실제 요청을 모두 남긴다.
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= 7500:
+        return data.decode("utf-8").strip()
+    marker = "\n...\n"
+    head = data[:2500].decode("utf-8", errors="ignore")
+    tail = data[-(7500 - 2500 - len(marker)):].decode("utf-8", errors="ignore")
+    return (head + marker + tail).strip()
 
 
 @dataclass(frozen=True)
@@ -58,9 +75,21 @@ class SearchQueries:
     def from_messages(cls, messages: Sequence[Message]) -> "SearchQueries":
         if not messages or messages[-1].role != "user":
             raise ValueError("invalid_search_messages")
-        latest = messages[-1].content[:12000].strip()
+        latest = bounded_excerpt(messages[-1].content, 12000).strip()
         # 과거 assistant 발화는 대상 복원용 단서다. 반환 근거는 언제나 KB 원문이다.
-        history = "\n".join(message.content for message in messages[:-1])[-24000:].strip()
+        history = "\n".join(message.content for message in messages[:-1])
+        if len(history) > 24000 or any(len(message.content) > 4000 for message in messages[:-1]):
+            fragments, remaining = [], 24000
+            for message in reversed(messages[:-1]):
+                separator = 1 if fragments else 0
+                allowance = min(4000, remaining - separator)
+                if allowance <= 0:
+                    break
+                fragment = bounded_excerpt(message.content, allowance)
+                fragments.append(fragment)
+                remaining -= len(fragment) + separator
+            history = "\n".join(reversed(fragments))
+        history = history.strip()
         return cls(latest, history)
 
 
@@ -99,10 +128,51 @@ class SearchResult:
     degraded: bool = False
     failure_reason: str | None = None
     semantic_section_ids: tuple[str, ...] = ()
+    source_coverage: tuple[tuple[str, int], ...] = ()
 
     @property
     def section_ids(self) -> tuple[str, ...]:
         return tuple(hit.section.section_id for hit in self.hits)
+
+    @property
+    def context_characters(self) -> int:
+        return sum(len(hit.section.text) for hit in self.hits)
+
+
+def merge_evidence(knowledge: KnowledgeBase, question: SearchResult, claims: SearchResult,
+                   citations: Sequence[str] = (), *, limit: int = 12) -> SearchResult:
+    """기존 근거 범위·순서를 보존하고 한도를 넘을 때 출처별 독점을 막는다."""
+    if type(limit) is not int or not 1 <= limit <= 12:
+        raise ValueError("invalid_evidence_limit")
+    cited = tuple(SearchHit(knowledge.by_id[sid], 0.0) for sid in dict.fromkeys(citations) if sid in knowledge.by_id)
+    sources = (("citation", cited), ("question", question.hits[:8]), ("claim", claims.hits))
+    ordered = {}
+    for _, source in sources:
+        for hit in source:
+            ordered.setdefault(hit.section.section_id, hit)
+    if len(ordered) <= limit:
+        # 공간이 충분하면 불필요한 근거 추가와 순서 변경을 피한다.
+        coverage = tuple((name, len({hit.section.section_id for hit in source})) for name, source in sources)
+        return SearchResult(tuple(ordered.values()), "verification", question.degraded or claims.degraded,
+                            question.failure_reason or claims.failure_reason, source_coverage=coverage)
+    positions = [0, 0, 0]
+    hits, seen = [], set()
+    while len(hits) < limit:
+        added = False
+        for index, (_, source) in enumerate(sources):
+            while positions[index] < len(source) and source[positions[index]].section.section_id in seen:
+                positions[index] += 1
+            if positions[index] < len(source) and len(hits) < limit:
+                hit = source[positions[index]]
+                positions[index] += 1
+                hits.append(hit)
+                seen.add(hit.section.section_id)
+                added = True
+        if not added:
+            break
+    coverage = tuple((name, len(seen & {hit.section.section_id for hit in source})) for name, source in sources)
+    return SearchResult(tuple(hits), "verification", question.degraded or claims.degraded,
+                        question.failure_reason or claims.failure_reason, source_coverage=coverage)
 
 
 @dataclass
@@ -131,6 +201,14 @@ class Retriever:
             "dense_ready": self.vectors is not None, "embedding_dimensions": EMBEDDING_DIMENSIONS,
             "cache_state": self.cache_state, "config": asdict(self.config), "counters": dict(self.counters),
         }
+
+    @staticmethod
+    def _queries(messages: Sequence[Message]) -> SearchQueries:
+        return SearchQueries.from_messages(messages)
+
+    @staticmethod
+    def _embedding_queries(queries: SearchQueries) -> list[str]:
+        return [_embedding_input(text) for text in (queries.latest, queries.history) if text]
 
     def _limit(self, top_k: int | None, expand: bool) -> int:
         count = top_k if top_k is not None else self.config.expanded_top_k if expand else self.config.top_k
@@ -175,15 +253,15 @@ class Retriever:
         )
 
     def lexical(self, messages: Sequence[Message], *, top_k: int | None = None, expand: bool = False) -> SearchResult:
-        return self._result(SearchQueries.from_messages(messages), self._limit(top_k, expand))
+        return self._result(self._queries(messages), self._limit(top_k, expand))
 
     async def search(
         self, messages: Sequence[Message], budget: RequestBudget, *, top_k: int | None = None, expand: bool = False,
     ) -> SearchResult:
-        queries = SearchQueries.from_messages(messages)
+        queries = self._queries(messages)
         limit = self._limit(top_k, expand)
         self.counters["queries"] += 1
-        inputs = [_embedding_input(text) for text in (queries.latest, queries.history) if text]
+        inputs = self._embedding_queries(queries)
         if not inputs or self.clients is None or self.vectors is None:
             return await asyncio.to_thread(self._result, queries, limit)
         try:
@@ -201,6 +279,7 @@ class Retriever:
 async def prepare_retriever(
     clients: ApiClients, *, kb_root: Path = DEFAULT_KB_ROOT, cache_path: Path = DEFAULT_CACHE_PATH,
     config: SearchConfig | None = None,
+    retriever_class: type[Retriever] = Retriever,
 ) -> Retriever:
     resolved = config or SearchConfig()
     kb = await asyncio.to_thread(load_knowledge, kb_root)
@@ -219,4 +298,4 @@ async def prepare_retriever(
         vectors = tuple(vectors_list)
         saved = await asyncio.to_thread(cache.save, kb, vectors)
         cache_state = "built" if saved else "write_unavailable"
-    return await asyncio.to_thread(Retriever, kb, clients, vectors, resolved, cache_state)
+    return await asyncio.to_thread(retriever_class, kb, clients, vectors, resolved, cache_state)

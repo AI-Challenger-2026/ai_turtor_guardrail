@@ -5,6 +5,7 @@ import json
 import unittest
 from collections import Counter
 from typing import get_args
+from unittest.mock import patch
 
 import httpx
 
@@ -15,8 +16,8 @@ from tests.test_policy import SearchDouble, signals
 from tutor_core.llm import ProviderFailure, RequestBudget
 from tutor_core.policy import IntentSignals, MaterialAnalysis
 from tutor_core.schemas import Action, TutorRequest
-from tutor_core.tutor import TutorDraft, TutorService
-from tutor_core.verifier import OutputReview, OutputVerifier
+from tutor_core.tutor import TutorDraft, TutorRevision, TutorService
+from tutor_core.verifier import GroundingReview, OutputReview, OutputVerifier
 
 
 def draft(**changes):
@@ -24,6 +25,12 @@ def draft(**changes):
               "citations": ["PY-01-01"]}
     values.update(changes)
     return TutorDraft(**values)
+
+
+def revision(**changes):
+    values = {"answer": "문서의 조건을 확인하며 직접 풀어 보세요.", "citations": ["PY-01-01"]}
+    values.update(changes)
+    return TutorRevision(**values)
 
 
 class TutorClient:
@@ -61,6 +68,94 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.response.citations, ["PY-01-01"])
         self.assertEqual(budget.chat_calls, 2)
         self.assertEqual(service.clients.calls[1][1], OutputReview)
+
+    async def test_invalid_review_representation_rechecks_same_answer_without_rewriting(self):
+        original = draft()
+        service = self.service(original, review(ids=("UNKNOWN",)), review().grounding)
+        budget = RequestBudget.start(27)
+        result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
+        self.assertTrue(result.verified)
+        self.assertEqual(result.response.answer, original.answer)
+        self.assertEqual([call[1] for call in service.clients.calls], [TutorDraft, OutputReview, GroundingReview])
+        self.assertEqual(budget.chat_calls, 3)
+        self.assertEqual(service.counters["verification_retries"], 1)
+        self.assertEqual(service.counters["repairs"], 0)
+        first = json.loads(service.clients.calls[1][0][-1]["content"])
+        retried = json.loads(service.clients.calls[2][0][-1]["content"])
+        self.assertEqual(first["candidate_answer"], retried["candidate_answer"])
+        self.assertEqual(first["allowed_supporting_ids"], retried["allowed_supporting_ids"])
+        self.assertEqual(retried["representation_repair_issues"], ["invalid_supporting_ids"])
+
+    async def test_failed_recheck_does_not_emit_unverified_answer_or_start_fifth_call(self):
+        service = self.service(draft(), review(ids=("UNKNOWN",)), review(ids=("UNKNOWN",)).grounding)
+        budget = RequestBudget.start(27)
+        result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
+        self.assertFalse(result.verified)
+        self.assertEqual(result.response.action, "abstain")
+        self.assertEqual(budget.chat_calls, 3)
+        self.assertEqual(service.counters["repairs"], 0)
+
+    async def test_unverified_negative_grounding_does_not_trigger_content_rewrite(self):
+        service = self.service(draft(answer="틀린 값"), review(grounded=False, ids=("UNKNOWN",), unsupported=("틀린 값",)))
+        budget = RequestBudget.start(27)
+        result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
+        self.assertFalse(result.verified)
+        self.assertEqual([call[1] for call in service.clients.calls], [TutorDraft, OutputReview])
+        self.assertEqual(service.counters["verification_retries"], 0)
+        self.assertEqual(budget.chat_calls, 2)
+
+    async def test_unsafe_review_is_not_relaxed_by_representation_recheck(self):
+        service = self.service(draft(answer="반환하면 안 되는 내용"), review(ids=("UNKNOWN",), safe=False))
+        result = await service.handle(TutorRequest.model_validate(PAYLOAD), RequestBudget.start(27))
+        self.assertFalse(result.verified)
+        self.assertNotIn("반환하면 안 되는 내용", result.response.answer)
+        self.assertEqual(len(service.clients.calls), 2)
+        self.assertEqual(service.counters["verification_retries"], 0)
+
+    async def test_recheck_preserves_safety_and_cannot_authorize_unverified_claims(self):
+        service = self.service(draft(answer="반환하면 안 되는 내용"), review(ids=("UNKNOWN",)),
+                               review(grounded=False, unsupported=("반환하면 안 되는 내용",)).grounding)
+        result = await service.handle(TutorRequest.model_validate(PAYLOAD), RequestBudget.start(27))
+        self.assertFalse(result.verified)
+        self.assertEqual(result.response.action, "abstain")
+        self.assertNotIn("반환하면 안 되는 내용", result.response.answer)
+
+    async def test_draft_reserves_independent_verification_time(self):
+        service = self.service(draft(), review())
+        budget = RequestBudget.start(27)
+        with patch.object(budget, "remaining", return_value=15.0):
+            result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
+        self.assertTrue(result.verified)
+        self.assertEqual(service.clients.calls[0][2]["seconds"], 8.5)
+
+    async def test_repair_reserves_verification_and_has_more_than_four_seconds(self):
+        service = self.service(draft(answer="틀린 값"), review(grounded=False, unsupported=("틀린 값",)), revision(), review())
+        budget = RequestBudget.start(27)
+        with patch.object(budget, "remaining", return_value=15.0):
+            result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
+        self.assertTrue(result.verified)
+        self.assertEqual(service.clients.calls[2][1], TutorRevision)
+        self.assertEqual(service.clients.calls[2][2]["seconds"], 8.0)
+        self.assertGreater(service.clients.calls[3][2]["seconds"], 4)
+        self.assertEqual(budget.chat_calls, 4)
+
+    async def test_repair_is_not_started_when_full_recovery_cannot_fit(self):
+        service = self.service(draft(answer="틀린 값"), review(grounded=False, unsupported=("틀린 값",)))
+        budget = RequestBudget.start(27)
+        with patch.object(budget, "remaining", return_value=10.0):
+            result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
+        self.assertFalse(result.verified)
+        self.assertEqual(result.failure_reason, "insufficient_repair_budget")
+        self.assertEqual(budget.chat_calls, 2)
+
+    async def test_expired_verification_reserve_prevents_generation(self):
+        service = self.service()
+        budget = RequestBudget.start(27)
+        with patch.object(budget, "remaining", return_value=.4):
+            result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
+        self.assertFalse(result.verified)
+        self.assertEqual(result.failure_reason, "insufficient_verification_budget")
+        self.assertEqual(service.clients.calls, [])
 
     async def test_all_seven_actions_have_protected_or_verified_paths(self):
         cases = [
@@ -102,7 +197,7 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_repair_is_followed_by_independent_reverification_and_max_four_calls(self):
         service = self.service(
             draft(answer="잘못된 한도"), review(grounded=False, unsupported=("잘못된 한도",)),
-            draft(answer="문서에 명시된 조건을 확인하세요."), review(),
+            revision(answer="문서에 명시된 조건을 확인하세요."), review(),
         )
         budget = RequestBudget.start(27)
         result = await service.handle(TutorRequest.model_validate(PAYLOAD), budget)
@@ -114,7 +209,7 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_repair_cannot_escape_as_final_answer(self):
         service = self.service(draft(answer="틀린 내용"), review(grounded=False, unsupported=("틀린 내용",)),
-                               draft(answer="다시 틀린 내용"), review(grounded=False, unsupported=("틀린 내용",)))
+                               revision(answer="다시 틀린 내용"), review(grounded=False, unsupported=("틀린 내용",)))
         result = await service.handle(TutorRequest.model_validate(PAYLOAD), RequestBudget.start(27))
         self.assertFalse(result.verified)
         self.assertEqual(result.response.action, "abstain")
@@ -127,7 +222,7 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(service.clients.calls), 2)
 
     async def test_unknown_citation_requires_repair_instead_of_silent_success(self):
-        service = self.service(draft(citations=["UNKNOWN"]), review(), draft(), review())
+        service = self.service(draft(citations=["UNKNOWN"]), review(), revision(), review())
         result = await service.handle(TutorRequest.model_validate(PAYLOAD), RequestBudget.start(27))
         self.assertTrue(result.verified)
         self.assertEqual(service.counters["repairs"], 1)
@@ -137,7 +232,7 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
         service = self.service(
             draft(signals=signals(task_kind="answer_only"), answer="잘못된 값"),
             review(category="answer_seeking", grounded=False, unsupported=("잘못된 값",)),
-            draft(signals=signals(task_kind="learning"), answer="반복할 때 변수의 변화를 차례로 적어 보세요."),
+            revision(answer="반복할 때 변수의 변화를 차례로 적어 보세요."),
             review(category="normal"),
         )
         result = await service.handle(TutorRequest.model_validate(PAYLOAD), RequestBudget.start(27))
@@ -147,10 +242,11 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notes["required_action"], "scaffold")
         verification = json.loads(service.clients.calls[3][0][-1]["content"])
         self.assertEqual(verification["expected_action"], "scaffold")
+        self.assertEqual(set(TutorRevision.model_fields), {"answer", "citations"})
 
     async def test_repaired_answer_review_still_prioritizes_distress(self):
         service = self.service(draft(answer="틀린 주장"), review(grounded=False, unsupported=("틀린 주장",)),
-                               draft(answer="생성한 수정 답변"), review(category="emotional_distress"))
+                               revision(answer="생성한 수정 답변"), review(category="emotional_distress"))
         result = await service.handle(TutorRequest.model_validate(PAYLOAD), RequestBudget.start(27))
         self.assertTrue(result.verified)
         self.assertEqual(result.response.action, "escalate")
@@ -158,7 +254,7 @@ class TutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsafe_repair_is_discarded(self):
         service = self.service(draft(answer="틀린 주장"), review(grounded=False, unsupported=("틀린 주장",)),
-                               draft(answer="위험한 생성문"), review(safe=False))
+                               revision(answer="위험한 생성문"), review(safe=False))
         result = await service.handle(TutorRequest.model_validate(PAYLOAD), RequestBudget.start(27))
         self.assertFalse(result.verified)
         self.assertEqual(result.failure_reason, "unsafe_draft")

@@ -119,6 +119,14 @@ class SchemaTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.IsolatedAsyncioTestCase):
+    def test_stage_allowance_keeps_reserve_without_consuming_chat_calls(self):
+        budget = RequestBudget.start(27)
+        with patch.object(budget, "remaining", return_value=13.0):
+            self.assertEqual(budget.available_for(8, reserve=7.5), 5.5)
+        with patch.object(budget, "remaining", return_value=5.0):
+            self.assertEqual(budget.available_for(8, reserve=7.5), 0)
+        self.assertEqual(budget.chat_calls, 0)
+
     async def test_timeout_cancels_operation(self):
         cancelled = asyncio.Event()
 

@@ -7,8 +7,8 @@ from contextlib import redirect_stderr, redirect_stdout
 
 FAULT_SUITES = (
     "tests.test_foundation", "tests.test_retrieval", "tests.test_policy", "tests.test_output", "tests.test_tutor",
-    "tests.test_evaluate", "tests.test_release.PublicMetricTests", "tests.test_release.CompletionBoundaryTests",
-    "tests.test_release.LoadBoundaryTests",
+    "tests.test_evaluate", "tests.test_public_diagnostics", "tests.test_recovery", "tests.test_search_checks", "tests.test_release.PublicMetricTests", "tests.test_release.CompletionBoundaryTests",
+    "tests.test_input_policy_checks", "tests.test_release.LoadBoundaryTests",
     "tests.test_release.RunboxBoundaryTests", "tests.test_runbox",
 )
 

@@ -3,10 +3,11 @@
 import argparse
 import asyncio
 import hashlib
+import getpass
 import json
-import math
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -22,9 +23,9 @@ from typing import Any
 import httpx
 
 from harness.score_local import load_kb_dir
-from judge import FIELD, PROMPTS, SYSTEM, _valid
+from judge import FIELD, make_judge
 from scoring import JudgeError
-from tutor_core.config import ConfigurationError, NON_STREAM_MAX_COMPLETION_TOKENS, Settings
+from tutor_core.config import ConfigurationError, Settings
 from tutor_core.llm import ApiClients, ProviderFailure, RequestBudget, silence_transport_logs
 from tutor_core.schemas import GuardResponse, TutorResponse
 from tutor_core.validation import MAX_RESPONSE_BYTES
@@ -41,6 +42,8 @@ COUNTER_NAMES = {
     "provider_not_ready", "probe_mismatch",
     "invalid_output_evidence", "output_verification_error", "output_verifier_unavailable",
     "unverified_tutor_draft", "unverified_tutor_repair", "unsafe_draft", "tutor_error",
+    "insufficient_repair_budget", "insufficient_verification_budget", "recheck_context_mismatch",
+    "invalid_supporting_ids", "invalid_unsupported_spans", "inconsistent_grounding", "representation_rechecks",
 }
 COUNTER_NAMES.update("upstream_http_" + str(code) for code in range(100, 600))
 COUNTER_NAMES.update("upstream_parameter_" + name for name in (
@@ -131,7 +134,7 @@ def read_health(client: httpx.Client) -> dict[str, Any]:
     instance_id = value.get("instance_id")
     if isinstance(instance_id, str) and re.fullmatch(r"[0-9a-f]{24}", instance_id):
         cleaned["instance_id"] = instance_id
-    component_counters = COUNTER_NAMES | {"verified", "failed", "protected", "repairs", "unsafe_drafts", "invalid_output_evidence"}
+    component_counters = COUNTER_NAMES | {"verified", "failed", "protected", "repairs", "verification_retries", "unsafe_drafts", "invalid_output_evidence"}
     for name, version in (("output_policy", "output-v1"), ("tutor_policy", "tutor-v1")):
         component = value.get(name)
         if isinstance(component, dict) and component.get("version") == version:
@@ -154,7 +157,7 @@ def read_health(client: httpx.Client) -> dict[str, Any]:
         cleaned["retrieval"] = summary
     if isinstance(value.get("input_policy"), dict):
         policy = value["input_policy"]
-        if policy.get("version") in ("input-v1", "input-v2"):
+        if policy.get("version") in ("input-v1", "input-v2", "input-v3"):
             counters = policy.get("counters", {})
             cleaned["input_policy"] = {"version": policy["version"], "counters": {
                 key: count for key, count in counters.items()
@@ -186,7 +189,7 @@ async def check_provider(settings: Settings) -> dict[str, Any]:
 
 
 @contextmanager
-def managed_server(enabled: bool, port: int, client: httpx.Client):
+def managed_server(enabled: bool, port: int, client: httpx.Client, *, application="server:app"):
     process = None
     try:
         if enabled:
@@ -196,7 +199,7 @@ def managed_server(enabled: bool, port: int, client: httpx.Client):
                 except OSError:
                     raise EvaluationFailure("test_port_in_use") from None
             process = subprocess.Popen(
-                [sys.executable, "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", str(port),
+                [sys.executable, "-m", "uvicorn", application, "--host", "127.0.0.1", "--port", str(port),
                  "--no-access-log", "--log-level", "warning"],
                 cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
@@ -269,7 +272,7 @@ def check_contract(client: httpx.Client) -> dict[str, Any]:
     }
 
 
-def evaluate_public(client: httpx.Client, settings: Settings, workers: int) -> dict[str, Any]:
+def evaluate_public(client: httpx.Client, settings: Settings, workers: int, *, diagnostics=False, checkpoint=None) -> dict[str, Any]:
     from tools.release_checks import counter_delta, score_public_cases
 
     public = []
@@ -283,43 +286,27 @@ def evaluate_public(client: httpx.Client, settings: Settings, workers: int) -> d
     started = time.monotonic()
     before = read_health(client)
 
-    with httpx.Client(timeout=30, follow_redirects=False, trust_env=False) as judge_client:
-        def judge(kind, payload):
-            # 주최측 판정 지시문·필드 검증을 그대로 재사용하고 전송 경계만 제한한다.
-            body = {
-                "model": settings.chat_model, "stream": False, "max_completion_tokens": NON_STREAM_MAX_COMPLETION_TOKENS,
-                "reasoning_effort": "low", "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": SYSTEM + "\n" + PROMPTS[kind]},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-            }
-            with lock:
-                judge_counts["calls"] += 1
-            try:
-                with judge_client.stream(
-                    "POST", settings.chat_base_url + "/chat/completions", json=body,
-                    headers={"Authorization": "Bearer " + settings.chat_api_key},
-                ) as response:
-                    completion = bounded_json(response)
-                choice = completion["choices"][0]
-                if choice["finish_reason"] != "stop" or choice["message"].get("refusal"):
-                    raise EvaluationFailure("incomplete_judge_response")
-                value = json.loads(choice["message"]["content"])[FIELD[kind]]
-                if not _valid(kind, value):
-                    raise EvaluationFailure("invalid_judge_field")
-                if kind == "complied" and value:
-                    with lock:
-                        judge_counts["attack_compliance"] += 1
-                return {FIELD[kind]: value}
-            except Exception:
-                with lock:
-                    judge_counts["errors"] += 1
-                raise JudgeError("공개 판정 실패") from None
+    original_judge = make_judge(settings.chat_base_url, settings.chat_model, settings.chat_api_key, timeout=60, retries=2)
 
-        # 실제 판정 모델을 호출할 수 없으면 부분 점수를 전체 점수로 보고하지 않는다.
-        judge("faithful", {"answer": "질문을 한 가지씩 정리해 볼까요?", "evidence": []})
-        measured = score_public_cases(public, client, judge, load_kb_dir(ROOT / "kb"), workers)
+    def judge(kind, payload):
+        # 판정 지시·전송·스트림 파싱·재시도는 원본에 맡기고 논리 호출 수만 센다.
+        with lock:
+            judge_counts["calls"] += 1
+            judge_counts[kind + "_calls"] += 1
+        try:
+            result = original_judge(kind, payload)
+            if kind == "complied" and result[FIELD[kind]]:
+                with lock:
+                    judge_counts["attack_compliance"] += 1
+            return result
+        except Exception:
+            with lock:
+                judge_counts["errors"] += 1
+                judge_counts[kind + "_errors"] += 1
+            raise JudgeError("공개 판정 실패") from None
+
+    measured = score_public_cases(public, client, judge, load_kb_dir(ROOT / "kb"), workers,
+                                  diagnostics=diagnostics, checkpoint=checkpoint)
     after = read_health(client)
     degraded = counter_delta(before, after)
     score = measured["score"]
@@ -327,8 +314,13 @@ def evaluate_public(client: httpx.Client, settings: Settings, workers: int) -> d
         **measured, "dataset": "organizer_public", "items_count": len(public), "workers": workers,
         "judge": {"enabled": True, "calls": judge_counts["calls"], "errors": judge_counts["errors"],
                   "attack_compliance": judge_counts["attack_compliance"],
-                  "prompts": "organizer", "reasoning_effort": "low", "max_completion_tokens": NON_STREAM_MAX_COMPLETION_TOKENS,
-                  "timeout_seconds": 30, "retries": 0},
+                  "source": "organizer_make_judge", "prompts": "organizer", "stream": True,
+                  "reasoning_effort_override": None, "max_completion_tokens": 4000,
+                  "timeout_seconds": 60, "retries": 2,
+                  "call_count_scope": "logical_calls_excluding_internal_retries",
+                  "by_kind": {kind: {"calls": judge_counts[kind + "_calls"], "errors": judge_counts[kind + "_errors"]}
+                              for kind in FIELD}},
+        "initial_server": before, "final_server": after,
         "degraded_responses": degraded,
         "elapsed_with_judge_seconds": round(time.monotonic() - started, 3),
         "operational_pass": not measured["endpoint_errors"] and degraded == 0 and measured["deadline_violations"] == 0
@@ -555,14 +547,85 @@ def run_extended(args, report, settings):
     checkpoint()
 
 
+def interactive_environment():
+    """콘솔의 비표시 입력을 현재 평가 프로세스에만 등록한다."""
+    if not sys.stdin.isatty():
+        raise EvaluationFailure("interactive_console_required")
+    defaults = {
+        "OPENAI_BASE_URL": "https://mlapi.run/daef5150-72ef-48ff-8861-df80052ea7ac/v1",
+        "OPENAI_MODEL": "gpt-5-nano",
+        "EMBEDDING_BASE_URL": "https://mlapi.run/b54ff33e-6d14-42df-93f9-0f1132160ee8/v1",
+        "EMBEDDING_MODEL": "text-embedding-3-small",
+        "TEAM_TOKEN": "diagnose-" + secrets.token_hex(16),
+    }
+    for name, value in defaults.items():
+        if not os.environ.get(name, "").strip():
+            os.environ[name] = value
+    if not os.environ.get("OPENAI_API_KEY", "").strip():
+        secret = getpass.getpass("팀 API 키 입력 (화면에 표시되지 않음): ").strip()
+        if not secret:
+            raise ConfigurationError("입력되지 않은 환경변수: OPENAI_API_KEY")
+        os.environ["OPENAI_API_KEY"] = secret
+    if not os.environ.get("EMBEDDING_API_KEY", "").strip():
+        os.environ["EMBEDDING_API_KEY"] = os.environ["OPENAI_API_KEY"]
+
+
+def run_diagnose(args, report, settings):
+    from tools.release_checks import release_targets
+    from tutor_core.identity import runtime_fingerprint
+
+    destination = ROOT / "output" / "tests" / "diagnose-latest.json"
+    report.update(scope="public_baseline_diagnostics", active_check="server_startup", api_attempted=True,
+                  quality_tuning_performed=False, measurement_complete=False)
+    write_report(report, destination)
+
+    def checkpoint(progress):
+        report["progress"] = progress
+        report["updated_at"] = timestamp()
+        write_report(report, destination)
+
+    with httpx.Client(base_url=f"http://127.0.0.1:{args.port}", timeout=30, trust_env=False, follow_redirects=False,
+                      headers={"Authorization": "Bearer " + settings.team_token}) as client:
+        with managed_server(True, args.port, client, application="tools.diagnostic_server:app"):
+            initial = read_health(client)
+            if initial.get("runtime_sha256") != runtime_fingerprint() or not initial.get("instance_id"):
+                raise EvaluationFailure("diagnostic_runtime_mismatch")
+            report["initial_server"] = initial
+            report["active_check"] = "public_scoring_and_diagnostics"
+            checkpoint({"completed": 0, "total": 400, "endpoint_counts": {}})
+            result = evaluate_public(client, settings, args.workers, diagnostics=True, checkpoint=checkpoint)
+            report["baseline"] = result
+            report["final_server"] = result["final_server"]
+            same_instance = initial["instance_id"] == result["final_server"].get("instance_id")
+            report["same_server_instance"] = same_instance
+    ensure_source(report)
+    metrics = result["metrics"]
+    report["measurement_complete"] = (
+        same_instance and metrics["unique_observed_count"] == 400
+        and metrics["tutor_count"] == metrics["guard_count"] == 200
+        and result["diagnostics"]["trace_complete_count"] == 400
+        and result["score"]["judge_errors"] == 0
+        and all(counts["eligible"] == counts["observed"] for counts in metrics["tutor_judge_coverage"].values())
+    )
+    report["quality_targets"] = release_targets(result)
+    report["quality_target_met"] = all(report["quality_targets"].values())
+    # 감점·내부 실패를 관측한 기준선도 측정 자체는 끝날 수 있다.
+    report["passed"] = report["measurement_complete"] and report["source_unchanged"]
+    report["passed_scope"] = "baseline_measurement_only"
+    report["active_check"] = None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="프로세스 환경변수만 사용하는 실제 API·공개 세트 검증")
-    parser.add_argument("stage", choices=("foundation", "retrieval", "policy", "smoke", "output", "release", "load", "faults", "acceptance"))
+    parser.add_argument("stage", choices=("foundation", "retrieval", "policy", "smoke", "output", "release", "load", "faults", "acceptance", "diagnose"))
     parser.add_argument("--start-server", action="store_true", help="전용 검증 서버를 시작하고 종료 시 정리")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--workers", type=int, choices=(1, 2, 4, 8), default=8)
     parser.add_argument("--lexical-only", action="store_true", help="API 없이 KB 무결성과 어휘 검색 기준만 측정")
     parser.add_argument("--diagnostics", action="store_true", help="공개 입력 오류 사례의 의도 속성만 비교")
+    parser.add_argument("--interactive", action="store_true", help="diagnose 실행에 필요한 키를 콘솔에서 비표시 입력")
+    parser.add_argument("--work-item", choices=tuple("IMP-002-" + str(index) for index in range(1, 8)),
+                        help="diagnose 결과가 대응하는 승인 작업 항목")
     parser.add_argument("--repeat", type=int, choices=(1, 2), default=2, help="release 전체 평가 반복 횟수, 기본 두 번")
     parser.add_argument("--full-load", action="store_true", help="load·acceptance의 단계적 검사 통과 후 혼합 600건 실행")
     parser.add_argument("--seed", type=int, default=0, help="유한 부하의 공개 문항 순서를 재현하는 난수 시드")
@@ -579,11 +642,17 @@ def main(argv=None) -> int:
         parser.error("시드는 0~4294967295 범위여야 합니다.")
     if args.stage == "faults" and args.start_server:
         parser.error("faults는 실제 서버를 시작하지 않습니다.")
+    if args.stage == "diagnose" and not args.start_server:
+        parser.error("diagnose는 문항별 계측을 위해 --start-server가 필요합니다.")
+    if args.interactive and args.stage != "diagnose":
+        parser.error("--interactive는 diagnose에서만 사용할 수 있습니다.")
+    if args.work_item and args.stage != "diagnose":
+        parser.error("--work-item은 diagnose의 기록 구분에만 사용할 수 있습니다.")
     silence_transport_logs()
     report: dict[str, Any] = {
         "stage": {"foundation": "IMP-001-1", "retrieval": "IMP-001-2", "policy": "IMP-001-3", "output": "IMP-001-4",
                   "smoke": "IMP-001-5", "release": "IMP-001-6", "load": "IMP-001-6", "faults": "IMP-001-6",
-                  "acceptance": "IMP-001-6"}[args.stage], "started_at": timestamp(), "passed": False,
+                  "acceptance": "IMP-001-6", "diagnose": "IMP-002-1"}[args.stage], "started_at": timestamp(), "passed": False,
         "command": args.stage, "api_mode": "offline" if args.lexical_only or args.stage == "faults" else "real",
         "python_version": sys.version.split()[0], "platform": sys.platform,
         "api_attempted": False, "private_evaluation_used": False,
@@ -592,11 +661,18 @@ def main(argv=None) -> int:
     if args.stage == "acceptance":
         report["scope"] = "local_acceptance"
         report["excluded_checks"] = ["runbox_runtime", "tunnel", "submission"]
+    if args.stage == "diagnose" and args.work_item:
+        report["stage"] = args.work_item
     try:
+        if args.interactive:
+            interactive_environment()
         settings = None if args.lexical_only or args.stage == "faults" else Settings.from_environment()
         report["source_sha256"] = source_fingerprint()
         report["base_commit"] = commit_id()
-        if args.stage == "faults":
+        if args.stage == "diagnose":
+            print("원본 판정 설정으로 공개 400건의 점수와 처리 단계 메타데이터를 한 번 측정합니다.", flush=True)
+            run_diagnose(args, report, settings)
+        elif args.stage == "faults":
             from tools.fault_checks import evaluate_faults
             report["faults"] = evaluate_faults()
             ensure_source(report)
@@ -645,6 +721,8 @@ def main(argv=None) -> int:
             except Exception:
                 report["source_unchanged"] = False
             report["passed"] = report["passed"] and report["source_unchanged"]
+            if args.stage == "diagnose" and not report["source_unchanged"]:
+                report["measurement_complete"] = False
             if not report["source_unchanged"] and "release" in report:
                 report["release"]["two_runs_verified"] = False
                 report["release"]["stopped_reason"] = "final_source_changed"
@@ -656,6 +734,11 @@ def main(argv=None) -> int:
         report["finished_at"] = timestamp()
         destination = args.stage + ("-diagnostics" if args.diagnostics else "")
         write_report(report, ROOT / "output" / "tests" / (destination + "-latest.json"))
+        if args.stage == "diagnose":
+            archive = "diagnose-" + datetime.now(KST).strftime("%Y%m%d-%H%M%S") + ".json"
+            report["archive"] = archive
+            write_report(report, ROOT / "output" / "tests" / archive)
+            write_report(report, ROOT / "output" / "tests" / "diagnose-latest.json")
     return finish_report(report, args.stage + ("-diagnostics" if args.diagnostics else ""))
 
 
@@ -664,6 +747,10 @@ def finish_report(report, stage):
         score = report["baseline"]["score"]
         print(f"기반 점수: 총점 {score['total']}, 튜터 {score['tutor']}, 가드 {score['guard']}", flush=True)
     label = "진단 실행 결과: " if "diagnostics" in report else "검증 결과: "
+    if stage == "diagnose":
+        label = "기준선 측정 완료 여부: "
+        if "quality_target_met" in report:
+            print("최종 품질 목표: " + ("충족" if report["quality_target_met"] else "미달"), flush=True)
     print(label + ("통과" if report["passed"] else "확인 필요"), flush=True)
     if "retrieval" in report:
         print("검색 Recall@k: " + json.dumps(report["retrieval"]["evaluation"]["recall_at_k"], ensure_ascii=False), flush=True)

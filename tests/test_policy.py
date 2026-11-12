@@ -18,7 +18,7 @@ from tests.test_retrieval import small_kb
 from tutor_core.guard import assess
 from tutor_core.knowledge import KnowledgeBase, KnowledgeSection
 from tutor_core.llm import ProviderFailure, RequestBudget
-from tutor_core.policy import ACTIONS, BLOCKED, InputAnalysis, InputPolicy, IntentSignals, MaterialAnalysis, analyze_intent, map_policy
+from tutor_core.policy import ACTIONS, BLOCKED, InputAnalysis, InputPolicy, IntentSignals, MaterialAnalysis, analyze_intent, apply_material, map_policy, valid_material
 from tutor_core.retrieval import SearchHit, SearchResult
 from tutor_core.schemas import Category, GuardRequest, Message
 
@@ -66,6 +66,23 @@ class PolicyMappingTests(unittest.TestCase):
         )
         for value, expected in cases:
             self.assertEqual(analyze_intent(value).category, expected)
+
+    def test_material_mapping_cannot_override_previously_detected_intent(self):
+        for category in get_args(Category):
+            original = analysis(category)
+            for coverage in ("supported", "general_explanation", "missing_course_fact", "uncertain"):
+                result = apply_material(original, coverage)
+                if category != "normal":
+                    self.assertIs(result, original)
+                else:
+                    self.assertEqual(result.category, "out_of_material" if coverage == "missing_course_fact" else "normal")
+
+    def test_material_requires_read_ids_and_consistent_evidence(self):
+        cases = (("supported", [], False), ("supported", ["PY-01-01"], True),
+                 ("supported", ["PY-01-02"], False), ("missing_course_fact", ["PY-01-01"], False),
+                 ("missing_course_fact", [], True), ("general_explanation", [], True))
+        for coverage, ids, expected in cases:
+            self.assertEqual(valid_material(MaterialAnalysis(coverage=coverage, supporting_ids=ids), {"PY-01-01"}), expected)
 
 
 class PolicyClientDouble(ProtocolDouble):
@@ -170,6 +187,24 @@ class InputPolicyTests(unittest.IsolatedAsyncioTestCase):
         repaired = json.loads(self.client.calls[-1][-1]["content"])
         self.assertIn("PY-01-02", repaired["allowed_supporting_ids"])
         self.assertEqual(len(self.client.calls), 3)
+
+    async def test_unread_ninth_section_is_rejected_when_expansion_time_is_missing(self):
+        self.policy.retriever = SearchDouble(12)
+        self.client.answers = [signals(), MaterialAnalysis(coverage="supported", supporting_ids=["PY-01-09"])]
+        result = await self.policy.classify(self.messages, RequestBudget.start(1))
+        self.assertFalse(result.verified)
+        self.assertEqual(result.failure_reason, "invalid_policy_evidence")
+        self.assertEqual(len(self.client.calls), 2)
+        sent = json.loads(self.client.calls[-1][-1]["content"])
+        self.assertNotIn("PY-01-09", sent["allowed_supporting_ids"])
+
+    async def test_missing_proof_and_contradictory_missing_cannot_pass_without_recheck(self):
+        for material in (MaterialAnalysis(coverage="supported", supporting_ids=[]),
+                         MaterialAnalysis(coverage="missing_course_fact", supporting_ids=["PY-01-01"])):
+            self.client.answers = [signals(), material]
+            result = await self.policy.classify(self.messages, RequestBudget.start(1))
+            self.assertFalse(result.verified)
+            self.assertEqual(result.failure_reason, "invalid_policy_evidence")
 
     async def test_api_failure_is_blocked_without_error_body_or_fake_success(self):
         self.client.error = ValueError("private-upstream-marker")

@@ -1,6 +1,7 @@
 """후보의 근거·안전을 검증하고 근거 없는 구간을 원문 위치로 복원한다."""
 
 import asyncio
+import hashlib
 import json
 import unicodedata
 from collections import Counter
@@ -9,9 +10,12 @@ from typing import Sequence
 
 from .llm import ApiClients, ProviderFailure, RequestBudget
 from .policy import InputAnalysis, PolicyResult, map_policy, unavailable_policy
-from .prompts import INTENT_SYSTEM, OUTPUT_SYSTEM
-from .retrieval import Retriever, SearchResult
+from .prompts import GROUNDING_RECHECK_SYSTEM, INPUT_POLICY_RULES, OUTPUT_SYSTEM
+from .retrieval import Retriever, SearchResult, merge_evidence
 from .schemas import Action, Category, Message, OutputAssessment, ResponseModel
+
+
+EVIDENCE_ISSUES = frozenset({"invalid_supporting_ids", "invalid_unsupported_spans", "inconsistent_grounding"})
 
 
 class GroundingReview(ResponseModel):
@@ -42,6 +46,10 @@ class VerificationResult:
     policy_compliant: bool = False
     failure_reason: str | None = None
     evidence: SearchResult | None = field(default=None, repr=False)
+    evidence_issues: tuple[str, ...] = ()
+    claimed_grounded: bool | None = None
+    candidate_digest: str | None = field(default=None, repr=False)
+    context_digest: str | None = field(default=None, repr=False)
 
     @property
     def verified(self) -> bool:
@@ -101,6 +109,73 @@ class OutputVerifier:
     def summary(self) -> dict:
         return {"version": "output-v1", "counters": dict(self.counters)}
 
+    @staticmethod
+    def _digests(messages, candidate):
+        """안전 판정을 다른 질문·답변에 재사용하지 않도록 요청 안에서만 비교한다."""
+        context = json.dumps([message.model_dump() for message in messages], ensure_ascii=False, separators=(",", ":"))
+        return tuple(hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest() for value in (candidate, context))
+
+    def _grounding(self, candidate, review, found):
+        unsupported, spans_valid = recover_spans(candidate, review.unsupported)
+        ids = tuple(dict.fromkeys(review.supporting_ids))
+        ids_valid = all(section_id in found.section_ids for section_id in ids)
+        consistent = not (review.grounded and unsupported)
+        issues = tuple(code for valid, code in (
+            (ids_valid, "invalid_supporting_ids"), (spans_valid, "invalid_unsupported_spans"),
+            (consistent, "inconsistent_grounding"),
+        ) if not valid)
+        verified = spans_valid and ids_valid and consistent
+        if not verified:
+            self.counters["invalid_output_evidence"] += 1
+            self.counters.update(issues)
+        return unsupported, ids if ids_valid else (), verified, issues
+
+    async def recheck(self, messages, candidate, budget, *, previous: VerificationResult, seconds: float):
+        """같은 질문·답변의 안전 판정을 보존하고 근거 표현만 한 번 다시 검증한다."""
+        digests = self._digests(messages, candidate)
+        if digests != (previous.candidate_digest, previous.context_digest):
+            return unavailable_verification("recheck_context_mismatch")
+        if not (previous.evidence is not None and previous.safety_verified and previous.output.safe
+                and previous.policy_compliant and previous.policy is not None and previous.policy.verified
+                and previous.claimed_grounded is True and previous.evidence_issues):
+            return previous
+        self.counters["requests"] += 1
+        self.counters["representation_rechecks"] += 1
+
+        async def evaluate():
+            found = previous.evidence
+            data = {
+                "conversation": [message.model_dump() for message in messages], "candidate_answer": candidate,
+                "sections": [{"id": hit.section.section_id, "text": hit.section.text} for hit in found.hits],
+                "allowed_supporting_ids": list(found.section_ids), "representation_repair_issues": list(previous.evidence_issues),
+            }
+            review = await self.clients.complete_json(
+                [{"role": "system", "content": GROUNDING_RECHECK_SYSTEM},
+                 {"role": "user", "content": json.dumps(data, ensure_ascii=False)}],
+                GroundingReview, budget, seconds=seconds, max_tokens=2000,
+            )
+            unsupported, ids, verified, issues = self._grounding(candidate, review, found)
+            return VerificationResult(
+                OutputAssessment(grounded=review.grounded and verified, unsupported=unsupported,
+                                 safe=previous.output.safe, category=previous.output.category),
+                verified, previous.safety_verified, ids, previous.policy, previous.policy_compliant,
+                None if verified else "invalid_output_evidence", found, issues, review.grounded, *digests,
+            )
+
+        try:
+            result = await budget.run(evaluate, seconds)
+            self.counters["verified" if result.verified else "failed"] += 1
+            return result
+        except Exception as exc:
+            reason = exc.reason if isinstance(exc, ProviderFailure) else "output_verification_error"
+            self.counters["failed"] += 1
+            self.counters[reason] += 1
+            return VerificationResult(
+                OutputAssessment(grounded=False, unsupported=[], safe=previous.output.safe, category=previous.output.category),
+                False, previous.safety_verified, policy=previous.policy, policy_compliant=previous.policy_compliant,
+                failure_reason=reason, evidence=previous.evidence, candidate_digest=digests[0], context_digest=digests[1],
+            )
+
     async def _evidence(
         self, messages: Sequence[Message], candidate: str, budget: RequestBudget,
         evidence: SearchResult | None, citations: Sequence[str] | None, search_candidate: bool,
@@ -122,23 +197,17 @@ class OutputVerifier:
             claims = await self.retriever.search(claim_query, budget, top_k=8)
         else:
             question = claims = evidence
-        hits = []
-        seen = set()
-        from .retrieval import SearchHit
-        cited = [SearchHit(self.retriever.knowledge.by_id[section_id], 0.0) for section_id in (citations or ())
-                 if section_id in self.retriever.knowledge.by_id]
-        question_hits = question.hits if not search_candidate else question.hits[:8]
-        for hit in (*cited, *question_hits, *claims.hits):
-            if hit.section.section_id not in seen and len(hits) < 12:
-                hits.append(hit)
-                seen.add(hit.section.section_id)
-        return SearchResult(tuple(hits), "verification", question.degraded or claims.degraded)
+        return self._merge_evidence(question, claims, citations)
+
+    def _merge_evidence(self, question, claims, citations):
+        return merge_evidence(self.retriever.knowledge, question, claims, citations or ())
 
     async def verify(
         self, messages: Sequence[Message], candidate: str, budget: RequestBudget, *,
         evidence: SearchResult | None = None, citations: Sequence[str] | None = None,
         expected_action: Action | None = None, seconds: float | None = None,
         search_candidate: bool = True,
+        repair_issues: Sequence[str] = (),
     ) -> VerificationResult:
         self.counters["requests"] += 1
         if candidate == "":
@@ -158,26 +227,32 @@ class OutputVerifier:
                 "citations": list(citations) if citations is not None else None,
                 "expected_action": expected_action,
             }
+            system = INPUT_POLICY_RULES + "\n\n" + OUTPUT_SYSTEM
+            if repair_issues:
+                data["representation_repair_issues"] = [issue for issue in repair_issues if issue in EVIDENCE_ISSUES]
+                system += (
+                    "\n이번 호출은 같은 후보·근거의 검토 표현을 재검사한다. "
+                    "supporting_ids는 allowed_supporting_ids에서만 선택하고 unsupported는 후보 원문의 실제 부분 문자열로 적는다. "
+                    "grounded와 unsupported의 모순을 남기지 않는다. 근거·안전을 자동으로 참으로 바꾸지 말고 원문을 다시 확인한다."
+                )
+                self.counters["representation_rechecks"] += 1
             review = await self.clients.complete_json(
-                [{"role": "system", "content": INTENT_SYSTEM + "\n\n" + OUTPUT_SYSTEM},
+                [{"role": "system", "content": system},
                  {"role": "user", "content": json.dumps(data, ensure_ascii=False)}],
                 OutputReview, budget, seconds=seconds or self.clients.settings.output_timeout, max_tokens=2000,
             )
-            unsupported, spans_valid = recover_spans(candidate, review.grounding.unsupported)
-            ids = tuple(dict.fromkeys(review.grounding.supporting_ids))
-            ids_valid = all(section_id in found.section_ids for section_id in ids)
-            consistent = not (review.grounding.grounded and unsupported)
-            grounding_verified = spans_valid and ids_valid and consistent
+            unsupported, ids, grounding_verified, issues = self._grounding(candidate, review.grounding, found)
             grounded = review.grounding.grounded and grounding_verified
-            if not grounding_verified:
-                self.counters["invalid_output_evidence"] += 1
             return VerificationResult(
                 OutputAssessment(grounded=grounded, unsupported=unsupported, safe=review.safety.safe,
                                  category=review.safety.category),
-                grounding_verified, True, ids if ids_valid else (), map_policy(review.safety.input_analysis),
+                grounding_verified, True, ids, map_policy(review.safety.input_analysis),
                 review.safety.policy_compliant,
                 None if grounding_verified else "invalid_output_evidence",
                 found,
+                issues,
+                review.grounding.grounded,
+                *self._digests(messages, candidate),
             )
 
         try:
