@@ -80,7 +80,7 @@ def render(messages: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, str]:
+async def classify(messages: List[Dict[str, str]], deadline=None, strong_submit: bool = False) -> Dict[str, str]:
     """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함)."""
     try:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
@@ -88,7 +88,7 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
         if MODE == "feat":
             text = " ".join(str(m.get("content", "")) for m in messages if m.get("role") == "user")
             if VOTES <= 1:
-                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw), text)
+                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw), text, strong_submit)
             # 다수결: 같은 입력을 VOTES번 병렬 분류해 신호별 과반으로 결정(실행마다 흔들리는 판정 안정화)
             outs = await asyncio.gather(*[chat_json(classify_feat.SYSTEM, render(messages), **kw) for _ in range(VOTES)],
                                         return_exceptions=True)
@@ -96,7 +96,7 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
             if not outs:
                 raise RuntimeError("all votes failed")
             flags = {k: sum(o.get(k) is True for o in outs) * 2 > len(outs) for k in classify_feat.FLAGS}
-            return {**classify_feat.decide(flags, text), "flags": flags}
+            return {**classify_feat.decide(flags, text, strong_submit), "flags": flags}
         out = await chat_json(SYSTEM, render(messages), **kw)
         cat = out.get("category")
         if cat not in CATEGORIES:

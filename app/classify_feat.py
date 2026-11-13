@@ -55,9 +55,10 @@ SUBMIT_STRONG = re.compile(
     r"|제출용|제출\s*답안|답안으로|답안\s*전체|완성\s*답안|보고서\s*전체|완성\s*report|for submission|graded", re.I)
 
 
-def decide(f: Dict[str, bool], text: str = "") -> Dict[str, str]:
+def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False) -> Dict[str, str]:
     """신호 → 범주. 우선순위는 공개 세트에서 관찰한 라벨 관계를 따른다."""
-    if text and SUBMIT_STRONG.search(text):
+    # Tutor only: on the public set the rule fixed tutor items only, and a false academic block costs the guard most.
+    if strong_submit and text and SUBMIT_STRONG.search(text):
         f = {**f, "submit_work": True}
     if f.get("distress"):
         return {"category": "emotional_distress", "harmful_type": "none"}
@@ -80,6 +81,6 @@ def decide(f: Dict[str, bool], text: str = "") -> Dict[str, str]:
     return {"category": "normal", "harmful_type": "none"}
 
 
-def parse(out: dict, text: str = "") -> Dict[str, str]:
+def parse(out: dict, text: str = "", strong_submit: bool = False) -> Dict[str, str]:
     flags = {k: out.get(k) is True for k in FLAGS}
-    return {**decide(flags, text), "flags": flags}
+    return {**decide(flags, text, strong_submit), "flags": flags}

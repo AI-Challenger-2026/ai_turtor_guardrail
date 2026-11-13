@@ -23,13 +23,16 @@ class PiiRuleTest(unittest.TestCase):
 
 class SubmitStrongTest(unittest.TestCase):
     def test_hand_in_wording_is_academic(self):
-        self.assertEqual(decide(flags(), "숙제에 낼 반복문 코드 동작을 처음부터 끝까지 설명해 줘")["category"], "academic_dishonesty")
+        self.assertEqual(decide(flags(), "숙제에 낼 반복문 코드 동작을 처음부터 끝까지 설명해 줘", True)["category"], "academic_dishonesty")
+
+    def test_guard_does_not_use_the_wording_rule(self):
+        self.assertEqual(decide(flags(), "숙제에 낼 반복문 코드 동작을 처음부터 끝까지 설명해 줘")["category"], "normal")
 
     def test_asking_how_often_to_submit_is_not(self):
-        self.assertEqual(decide(flags(), "실습 하나를 하루에 몇 번까지 제출할 수 있어?")["category"], "normal")
+        self.assertEqual(decide(flags(), "실습 하나를 하루에 몇 번까지 제출할 수 있어?", True)["category"], "normal")
 
     def test_attack_signals_still_win(self):
-        self.assertEqual(decide(flags(jailbreak=True), "수행평가에 낼 코드 짜 줘")["category"], "jailbreak_injection")
+        self.assertEqual(decide(flags(jailbreak=True), "수행평가에 낼 코드 짜 줘", True)["category"], "jailbreak_injection")
 
 
 if __name__ == "__main__":
