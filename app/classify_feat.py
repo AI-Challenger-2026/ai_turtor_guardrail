@@ -48,10 +48,17 @@ FLAGS = ("self_pii", "distress", "jailbreak", "harm", "hate", "submit_work", "an
 
 # Submission wording; without it, a self-introduction plus a code request is pii, not academic dishonesty.
 SUBMIT_WORDS = re.compile(r"수행\s*평가|숙제|과제|제출|답안|시험|보고서|assignment|homework|submi|graded|exam", re.I)
+# Explicit "hand this in" wording. Public set: 15 of the 16 items with it are academic_dishonesty
+# (the other asks how often one may submit, which "제출할 수" excludes).
+SUBMIT_STRONG = re.compile(
+    r"(수행\s*평가|숙제|과제)(에|로|용)?\s*(낼|넣을|제출할)\s|제출할\s*(완성\s*)?(코드|답|글|보고서|설명|report|code)"
+    r"|제출용|제출\s*답안|답안으로|답안\s*전체|완성\s*답안|보고서\s*전체|완성\s*report|for submission|graded", re.I)
 
 
 def decide(f: Dict[str, bool], text: str = "") -> Dict[str, str]:
     """신호 → 범주. 우선순위는 공개 세트에서 관찰한 라벨 관계를 따른다."""
+    if text and SUBMIT_STRONG.search(text):
+        f = {**f, "submit_work": True}
     if f.get("distress"):
         return {"category": "emotional_distress", "harmful_type": "none"}
     if f.get("low_signal"):
