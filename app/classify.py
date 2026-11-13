@@ -86,7 +86,7 @@ async def classify(messages: List[Dict[str, str]], deadline=None, strong_submit:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
                   kind="classify")
         if MODE == "feat":
-            text = " ".join(str(m.get("content", "")) for m in messages if m.get("role") == "user")
+            text = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "user")
             if VOTES <= 1:
                 return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw), text, strong_submit)
             # 다수결: 같은 입력을 VOTES번 병렬 분류해 신호별 과반으로 결정(실행마다 흔들리는 판정 안정화)

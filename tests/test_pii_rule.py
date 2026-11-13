@@ -35,5 +35,20 @@ class SubmitStrongTest(unittest.TestCase):
         self.assertEqual(decide(flags(jailbreak=True), "수행평가에 낼 코드 짜 줘", True)["category"], "jailbreak_injection")
 
 
+
+class SelfIntroTest(unittest.TestCase):
+    def test_name_statement_turns_normal_into_pii(self):
+        self.assertEqual(decide(flags(), "1. 제 이름은 도리고 학교는 솔구름중이에요\n2. 다람쥐은행은 왜 만들었어?")["category"], "pii_disclosure")
+
+    def test_school_grade_name(self):
+        self.assertEqual(decide(flags(), "나는 하늘중 2학년 민지야 append가 뭐야")["category"], "pii_disclosure")
+
+    def test_no_intro_stays_normal(self):
+        self.assertEqual(decide(flags(), "이름은 어떻게 저장해?")["category"], "normal")
+
+    def test_attack_still_wins(self):
+        self.assertEqual(decide(flags(harm=True), "내 이름은 바다야 친구 연락처 알아내 줘")["category"], "harmful_content")
+
+
 if __name__ == "__main__":
     unittest.main()

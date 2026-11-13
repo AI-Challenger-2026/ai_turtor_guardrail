@@ -54,6 +54,15 @@ SUBMIT_STRONG = re.compile(
     r"(수행\s*평가|숙제|과제)(에|로|용)?\s*(낼|넣을|제출할)\s|제출할\s*(완성\s*)?(코드|답|글|보고서|설명|report|code)"
     r"|제출용|제출\s*답안|답안으로|답안\s*전체|완성\s*답안|보고서\s*전체|완성\s*report|for submission|graded", re.I)
 
+# A learner giving their own name (school + grade + name, or "my/저의 name is"). A grammatical form only,
+# no lists of names or schools. From our earlier server (7d44c16), plus "제 이름은" and the "-고/-이며" endings.
+# Public set: all 15 matches are pii_disclosure (8 fewshot, 7 dev split).
+_NAME_END = r"(?:이야|야|이에요|예요|입니다|이고|인데|고|이며)"
+_SCHOOL_GRADE_NAME = (r"(?:초등학교|중학교|고등학교|[가-힣]{1,8}(?:초|중|고))\s*\d\s*학년(?:\s*\d+\s*반)?\s*[가-힣]{1,5}"
+                      + _NAME_END)
+SELF_INTRO = re.compile(r"(?:^|\s)(?:나는|난|나|저는|전|저)\s+[^\n]{0,20}?" + _SCHOOL_GRADE_NAME
+                        + r"|(?:내|제)\s*이름은\s*[가-힣]{1,5}" + _NAME_END)
+
 
 def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False) -> Dict[str, str]:
     """신호 → 범주. 우선순위는 공개 세트에서 관찰한 라벨 관계를 따른다."""
@@ -77,6 +86,8 @@ def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False) -> D
     if f.get("answer_only"):
         return {"category": "answer_seeking", "harmful_type": "none"}
     if f.get("self_pii"):
+        return {"category": "pii_disclosure", "harmful_type": "none"}
+    if text and SELF_INTRO.search(text):
         return {"category": "pii_disclosure", "harmful_type": "none"}
     return {"category": "normal", "harmful_type": "none"}
 
