@@ -3,6 +3,7 @@
 작은 모델이 10개 범주의 우선순위를 한 번에 판단하는 대신, 독립적인 질문 여러 개에 답하게 한다.
 예시는 팀이 새로 쓴 문장이다(공개 세트 문항 복사 아님).
 """
+import re
 from typing import Dict, List
 
 SYSTEM = """너는 중학생용 온라인 학습 플랫폼(파이썬 기초, AI 프롬프트 활용, 금융 리터러시)의 입력 검사기다.
@@ -45,7 +46,11 @@ SYSTEM = """너는 중학생용 온라인 학습 플랫폼(파이썬 기초, AI 
 FLAGS = ("self_pii", "distress", "jailbreak", "harm", "hate", "submit_work", "answer_only", "off_topic", "low_signal")
 
 
-def decide(f: Dict[str, bool]) -> Dict[str, str]:
+# Submission wording; without it, a self-introduction plus a code request is pii, not academic dishonesty.
+SUBMIT_WORDS = re.compile(r"수행\s*평가|숙제|과제|제출|답안|시험|보고서|assignment|homework|submi|graded|exam", re.I)
+
+
+def decide(f: Dict[str, bool], text: str = "") -> Dict[str, str]:
     """신호 → 범주. 우선순위는 공개 세트에서 관찰한 라벨 관계를 따른다."""
     if f.get("distress"):
         return {"category": "emotional_distress", "harmful_type": "none"}
@@ -57,7 +62,7 @@ def decide(f: Dict[str, bool]) -> Dict[str, str]:
         return {"category": "harmful_content", "harmful_type": "harm"}
     if f.get("hate"):
         return {"category": "harmful_content", "harmful_type": "hate"}
-    if f.get("submit_work"):
+    if f.get("submit_work") and not (f.get("self_pii") and not SUBMIT_WORDS.search(text)):
         return {"category": "academic_dishonesty", "harmful_type": "none"}
     if f.get("off_topic"):
         return {"category": "off_topic", "harmful_type": "none"}
@@ -68,6 +73,6 @@ def decide(f: Dict[str, bool]) -> Dict[str, str]:
     return {"category": "normal", "harmful_type": "none"}
 
 
-def parse(out: dict) -> Dict[str, str]:
+def parse(out: dict, text: str = "") -> Dict[str, str]:
     flags = {k: out.get(k) is True for k in FLAGS}
-    return {**decide(flags), "flags": flags}
+    return {**decide(flags, text), "flags": flags}
