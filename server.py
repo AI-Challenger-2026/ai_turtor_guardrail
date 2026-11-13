@@ -57,6 +57,7 @@ SPECULATIVE = os.environ.get("SPECULATIVE", "1") == "1"  # 튜터: 분류와 답
 GUARD_OOM = os.environ.get("GUARD_OOM", "1") == "1"  # 가드에서 out_of_material 범주 판정(DEVLOG 13장)
 GUARD_OOM_MODE = os.environ.get("GUARD_OOM_MODE", "parallel")  # "parallel": 처음부터 동시 실행(기본) | "after": 분류가 normal일 때만 뒤이어 확인(가드 지연 증가로 기각)
 REQUEST_BUDGET = float(os.environ.get("REQUEST_BUDGET", "23"))  # 전체 예산(초). 서버 시간은 처리 함수 진입부터라, 부하 시 터널·프록시 대기(최대 약 5초)를 위해 30초에서 7초 여유(DEVLOG 14장)
+HARD_CAP = float(os.environ.get("HARD_CAP", "25"))  # absolute per-request cap (s); answers with the fallback without waiting for cancellation
 CLASSIFY_BUDGET = float(os.environ.get("CLASSIFY_BUDGET", "12"))  # 튜터에서 분류에 쓸 최대 시간(초)
 # Guard candidate verifier jury (added on top of final-v3): N calls at once, majority, two that agree
 # decide. 1 = final-v3's single hedged call.
@@ -285,6 +286,27 @@ def _log_request(endpoint: str, status: int, t0: float, body_bytes: int, message
         pass
 
 
+class HardCapExceeded(Exception):
+    pass
+
+
+def _reap(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _capped(coro, t0: float):
+    """Run the request logic under HARD_CAP. asyncio.wait (unlike wait_for) returns at the cap
+    without waiting for the cancelled work to unwind, so a stuck cancellation cannot delay the reply."""
+    task = asyncio.ensure_future(coro)
+    done, _ = await asyncio.wait({task}, timeout=max(0.5, t0 + HARD_CAP - time.time()))
+    if task in done:
+        return task.result()
+    task.cancel()
+    task.add_done_callback(_reap)
+    raise HardCapExceeded()
+
+
 @app.post("/tutor")
 async def tutor(request: Request):
     t0 = time.time()
@@ -296,9 +318,10 @@ async def tutor(request: Request):
     try:
         messages, _ = await read_payload(request)
         body_bytes = len(await request.body())
-        out = TutorResponse(**await tutor_logic(messages, t0)).model_dump()
+        out = TutorResponse(**await _capped(tutor_logic(messages, t0), t0)).model_dump()
     except Exception as e:  # noqa: BLE001  — 어떤 경우에도 규격 응답(값 검증 실패도 여기로)
-        info.update(outcome="fallback_exception", error=type(e).__name__)
+        info.update(outcome="fallback_hardcap" if isinstance(e, HardCapExceeded) else "fallback_exception",
+                    error=type(e).__name__)
         out = {"answer": FALLBACK, "action": "answer", "citations": []}
     _log_request("/tutor", 200, t0, body_bytes, messages, None, info)
     return out
@@ -315,9 +338,10 @@ async def guard(request: Request):
     try:
         messages, cand = await read_payload(request)
         body_bytes = len(await request.body())
-        out = GuardResponse(**await guard_logic(messages, cand, t0)).wire()
+        out = GuardResponse(**await _capped(guard_logic(messages, cand, t0), t0)).wire()
     except Exception as e:  # noqa: BLE001  — 값 검증 실패도 여기로
-        info.update(outcome="fallback_exception", error=type(e).__name__)
+        info.update(outcome="fallback_hardcap" if isinstance(e, HardCapExceeded) else "fallback_exception",
+                    error=type(e).__name__)
         out = {"input": {"decision": "allow", "category": "normal"}}
         if cand is not None:
             out["output"] = {"grounded": True, "unsupported": [], "safe": True, "category": "normal"}
