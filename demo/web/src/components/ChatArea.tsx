@@ -96,11 +96,8 @@ export function ChatArea({ messages, typing, onPrompt, onSource, onGuard }: Prop
         <div className="empty-state">
           <div className="tutor-mark">
             <span>
-              <img src="assets/118a7.svg" alt="" />
+              <img src="assets/928fb.svg" alt="" />
             </span>
-            <i>
-              <img src="assets/e18f6.svg" alt="" />
-            </i>
           </div>
           <h1>오늘 뭐가 궁금해요?</h1>
           

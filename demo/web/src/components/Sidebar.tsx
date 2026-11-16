@@ -46,10 +46,9 @@ export function Sidebar({ open, onClose, onReset, hasAnswer }: Props) {
       <div className="profile">
         <span className="avatar">♟</span>
         <span className="profile-copy">
-          <b>학습자</b>
+          <b>학습자 </b>
           <small>시연 계정</small>
         </span>
-        <span>⚙</span>
       </div>
     </aside>
   )

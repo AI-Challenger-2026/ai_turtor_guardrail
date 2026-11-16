@@ -1,7 +1,6 @@
 import { useState, type FormEvent } from "react"
 import type { PanelView } from "../App"
 import { CATEGORY_LABEL } from "../labels"
-import { reviewItems } from "../mockData"
 import { checkGuard, type ChatTurn, type GuardResult, type TutorResponse } from "../services/tutorService"
 
 // Mark every occurrence of the unsupported spans inside the answer text.
@@ -157,13 +156,10 @@ export function RightPanel({
     <aside className={`right-panel ${open ? "is-open" : ""}`}>
       <div className="right-heading">
         <div className="panel-tabs" aria-label="패널 보기 선택">
-          <button className={view === "review" ? "active" : ""} onClick={() => onViewChange("review")}>
-            ☷ 복습
-          </button>
           <button className={view === "source" ? "active" : ""} onClick={() => onViewChange("source")} disabled={!source}>
             ▣ 출처
           </button>
-          <button className={view === "guard" ? "active" : ""} onClick={() => onViewChange("guard")}>
+          <button className={view !== "source" || !source ? "active" : ""} onClick={() => onViewChange("guard")}>
             ◈ 가드
           </button>
         </div>
@@ -176,9 +172,7 @@ export function RightPanel({
           {source.subject} · {source.id}
         </div>
       )}
-      {view === "guard" ? (
-        <GuardView response={response} guardTurns={guardTurns} />
-      ) : view === "source" && source ? (
+      {view === "source" && source ? (
         <div className="source-view">
           <article>
             <b>▣ 수업 자료 원문</b>
@@ -189,15 +183,8 @@ export function RightPanel({
           </article>
         </div>
       ) : (
-        <div className="review-list">
-          {reviewItems.map((item) => (
-            <article key={item.title}>
-              <b style={{ color: item.color }}>{item.eyebrow}</b>
-              <h3>{item.title}</h3>
-              <p>{item.description}</p>
-            </article>
-          ))}
-        </div>
+        // Guard view is the default; it also covers "source" when the answer has no source.
+        <GuardView response={response} guardTurns={guardTurns} />
       )}
       <div className="sheet-handle" />
     </aside>

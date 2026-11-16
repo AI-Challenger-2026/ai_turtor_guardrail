@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { ChatArea } from "./components/ChatArea"
 import { MessageInput } from "./components/MessageInput"
 import { RightPanel } from "./components/RightPanel"
@@ -15,7 +15,7 @@ export type Message =
   | { id: number; role: "student"; text: string }
   | { id: number; role: "tutor"; response: TutorResponse }
 
-export type PanelView = "review" | "source" | "guard"
+export type PanelView = "source" | "guard"
 
 function toTurns(messages: Message[]): ChatTurn[] {
   return messages.flatMap((m): ChatTurn[] =>
@@ -34,8 +34,11 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState(
     () => !window.matchMedia("(max-width: 1100px)").matches,
   )
-  const [panelView, setPanelView] = useState<PanelView>("review")
+  const [panelView, setPanelView] = useState<PanelView>("guard")
   const [activeId, setActiveId] = useState<number | null>(null)
+  // Conversation number. "새 학습" bumps it; replies from an older conversation that arrive later are dropped.
+  const [session, setSession] = useState(0)
+  const sessionRef = useRef(0)
 
   useEffect(() => {
     const mobileLayout = window.matchMedia("(max-width: 1100px)")
@@ -71,8 +74,10 @@ export default function App() {
     const history: Message[] = [...messages, { id: Date.now(), role: "student", text: clean }]
     setMessages(history)
     setTyping(true)
+    const mySession = sessionRef.current
     const turns = toTurns(history)
     const response = await getTutorResponse(turns)
+    if (sessionRef.current !== mySession) return // reset while waiting: drop the stale reply
     const id = Date.now() + 1
     setMessages((current) => [...current, { id, role: "tutor", response }])
     setActiveId(id)
@@ -84,8 +89,8 @@ export default function App() {
     if (response.guardState === "pending") {
       // The guard re-checks the tutor's own answer against the same conversation.
       checkGuard(turns, response.answer)
-        .then((guard) => updateResponse(id, { guard, guardState: "done" }))
-        .catch(() => updateResponse(id, { guardState: "error" }))
+        .then((guard) => sessionRef.current === mySession && updateResponse(id, { guard, guardState: "done" }))
+        .catch(() => sessionRef.current === mySession && updateResponse(id, { guardState: "error" }))
     }
   }
 
@@ -96,18 +101,20 @@ export default function App() {
     const panel = params.get("panel")
     if (ask) {
       sendMessage(ask).then(() => {
-        if (panel === "review" || panel === "source" || panel === "guard") setPanelView(panel)
+        if (panel === "source" || panel === "guard") setPanelView(panel)
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const reset = () => {
+    sessionRef.current += 1
+    setSession(sessionRef.current)
     setMessages([])
     setTyping(false)
     setSidebarOpen(false)
     setActiveId(null)
-    setPanelView("review")
+    setPanelView("guard")
   }
 
   const openPanel = (id: number, view: PanelView) => {
@@ -142,6 +149,7 @@ export default function App() {
         <button className="backdrop panel-backdrop" aria-label="패널 닫기" onClick={() => setPanelOpen(false)} />
       )}
       <RightPanel
+        key={session} // remount on reset so the guard check box and its result are cleared too
         open={panelOpen}
         view={panelView}
         response={activeResponse}
