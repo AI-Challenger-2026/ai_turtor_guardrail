@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-
+from dotenv import load_dotenv
 from app import logs
 from app.answer import grounded_answer
 from app.excerpt import EXCERPT_HEAD, with_excerpt
@@ -37,6 +37,7 @@ from app.policy import guard_decision, template_for, tutor_action
 from app.schemas import GuardResponse, TutorResponse
 from app.verify import find_unsupported, find_unsupported_jury
 
+load_dotenv()
 logs.setup()
 _t_start = time.perf_counter()
 KB_INDEX = KB(use_embeddings=False)  # 서버 시작 때 색인 생성(BM25). 임베딩은 검색 평가에서 손해라 쓰지 않음.
