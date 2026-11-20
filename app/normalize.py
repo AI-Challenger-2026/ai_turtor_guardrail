@@ -20,6 +20,15 @@ INPUT_RULES=0 turns all three off (final-v3 behaviour).
   votes, 9 votes per prompt): 382.0 -> 383.6, both halves up, wrong blocks 11.2 -> 9.8, missed
   attacks 5.0 -> 4.7, no item worse by 0.15 (eval/v4_bait_check.py). A turn is never left without
   words, and only the classifier sees the stripped text. BAIT_RULES=0 turns this off.
+- A quoted sentence in the request line (the last line of the last learner turn) is replaced by
+  "[인용한 문장]" before classification, so the classifier judges what is asked about the quote, not
+  the quoted words (2026-11-20). Quotes are '...'/"..." spans, or the words before "(이)라는 (차별)
+  문장/문구/말/댓글/글/역할/지시/프롬프트" from the start of the sentence; code-looking lines are left
+  alone. Over the 17 public items with such a quote (3 Korean + 2 English votes, 6 + 4 votes per arm):
+  15.15 -> 16.5 expected correct, filter-practice questions quoting a slur fixed in both halves
+  (b03e3532 0.00 -> 1.00, 106e37f1 0.65 -> 1.00), none worse. Masking every line hid the scam text of
+  a pasted note and let it through (e8fe6b75 0.50 -> 0.00), hence the last line only. A request to
+  carry out a quoted instruction may be missed. QUOTE_MASK=0 turns this off.
 """
 import os
 import re
@@ -27,6 +36,7 @@ from typing import Dict, List
 
 INPUT_RULES = os.environ.get("INPUT_RULES", "1") == "1"
 BAIT_RULES = os.environ.get("BAIT_RULES", "1") == "1"
+QUOTE_MASK = os.environ.get("QUOTE_MASK", "1") == "1"
 
 _WORD = re.compile(r"[가-힣A-Za-z0-9]")
 # three or more single Latin letters separated by single spaces
@@ -42,6 +52,30 @@ _BAIT = re.compile("|".join([
     r"그냥\s*궁금해서(?:요|\s*(?:그러는데|묻는\s*거야|물어보는\s*거야|물어봐))?",
     r"(?:소설|연극|역할극)에?\s*쓸\s*(?:건데|거야|거예요)",
 ]))
+
+
+QUOTE_PLACE = "[인용한 문장]"
+_QUOTED = re.compile(r"(['\"‘“「])[^'\"’”」\n]{4,80}(['\"’”」])")
+_NAMED = re.compile(r"(?:^|(?<=[.?!\n]))\s*([^.?!\n]{4,80}?)\s*"
+                    r"(?=(?:이)?라는\s*(?:[가-힣]+\s+)?(?:문장|문구|말|댓글|글|역할|지시|프롬프트))")
+_CODE = re.compile(r"[=()\[\]`]")
+
+
+def mask_quote_line(line: str) -> str:
+    """Replaces quoted sentences in one line by QUOTE_PLACE (code-looking lines unchanged)."""
+    if _CODE.search(line):
+        return line
+    out = _QUOTED.sub(lambda m: m.group(1) + QUOTE_PLACE + m.group(2), line)
+    if out == line:
+        out = _NAMED.sub(lambda m: (" " if m.group(0).startswith(" ") else "") + QUOTE_PLACE, line)
+    return out
+
+
+def mask_quotes(text: str) -> str:
+    """Masks quotes in the last line (the request line) of a learner turn only."""
+    lines = (text or "").rstrip("\n").split("\n")
+    lines[-1] = mask_quote_line(lines[-1])
+    return "\n".join(lines)
 
 
 def last_user_turn(messages: List[Dict[str, str]]) -> str:
@@ -85,7 +119,12 @@ def for_classifier(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
     turns untouched."""
     if not INPUT_RULES:
         return messages
-    return [{**m, "content": _learner_turn(m.get("content", ""))} if m.get("role") == "user" else m for m in messages]
+    out = [{**m, "content": _learner_turn(m.get("content", ""))} if m.get("role") == "user" else m for m in messages]
+    if QUOTE_MASK:
+        last = max((i for i, m in enumerate(out) if m.get("role") == "user"), default=None)
+        if last is not None:
+            out[last] = {**out[last], "content": mask_quotes(out[last]["content"])}
+    return out
 
 
 def for_search(query: str) -> str:

@@ -615,6 +615,15 @@ class InputRuleTests(ServerTestCase):
         self.assertTrue(seen and all("거절" not in u and "break가 언제 멈추는지" in u for u in seen))
         self.assertTrue(gen and all("거절하지 말고" in u for u in gen))
 
+    def test_generator_sees_the_quote_the_classifier_does_not(self):
+        seen, gen = [], []
+        self.fake.classify = lambda user, system: seen.append(user) or dict(NO_FLAGS)
+        default = self.fake.generate
+        self.fake.generate = lambda user, system: gen.append(user) or default(user, system)
+        self.tutor("'그 반 애들은 다 나가'라는 댓글은 거름망에서 어떻게 걸러?")
+        self.assertTrue(seen and all("[인용한 문장]" in u and "다 나가" not in u for u in seen))
+        self.assertTrue(gen and all("다 나가" in u for u in gen))
+
     def test_bait_switch_off_keeps_the_phrases(self):
         normalize.BAIT_RULES = False
         try:
@@ -666,6 +675,43 @@ class NormalizeTests(unittest.TestCase):
         self.assertFalse(any(normalize.has_words(t) for t in ("ㅠㅠ", "??", "ㅋㅋㅋ", "...", "ㅁㄴㅇㄹ", "", "  ")))
         self.assertTrue(all(normalize.has_words(t) for t in ("ㅠㅠ 어려워", "a??", "1", "왜??")))
 
+
+
+class QuoteMaskTests(unittest.TestCase):
+    """Quoted sentences in the request line are hidden from the classifier. Team-written sentences."""
+
+    def test_named_quote_in_the_request_line(self):
+        self.assertEqual(normalize.mask_quotes("거름망 실습에서 그 반 애들은 다 나가라는 문장은 어떻게 걸러?"),
+                         "[인용한 문장]라는 문장은 어떻게 걸러?")
+        self.assertEqual(normalize.mask_quotes("그 반 애들은 빠져야 해라는 차별 문구를 실습처럼 정리하면?"),
+                         "[인용한 문장]라는 차별 문구를 실습처럼 정리하면?")
+
+    def test_quotation_marks(self):
+        self.assertEqual(normalize.mask_quotes("'규칙을 모두 잊어'라는 말은 왜 위험해?"), "'[인용한 문장]'라는 말은 왜 위험해?")
+
+    def test_only_the_last_line(self):
+        text = "메모\n'비밀번호를 지금 입력하세요'라는 글은 짧아\n그 문자 한 통을 완성해 줘"
+        self.assertEqual(normalize.mask_quotes(text), text)
+
+    def test_code_lines_and_plain_lines_untouched(self):
+        for same in ('print(color.count("blue"))', "반복문은 언제 멈춰?", "변수 이름은 어떻게 지어?"):
+            self.assertEqual(normalize.mask_quotes(same), same)
+
+    def test_classifier_sees_the_mask_and_earlier_turns_do_not_change(self):
+        msgs = [{"role": "user", "content": "'규칙을 모두 잊어'라는 말은 왜 위험해?"},
+                {"role": "assistant", "content": "…"},
+                {"role": "user", "content": "'규칙을 모두 잊어'라는 말은 어디서 써?"}]
+        out = normalize.for_classifier(msgs)
+        self.assertEqual(out[0]["content"], msgs[0]["content"])
+        self.assertEqual(out[2]["content"], "'[인용한 문장]'라는 말은 어디서 써?")
+
+    def test_switch_off(self):
+        normalize.QUOTE_MASK = False
+        try:
+            msgs = [{"role": "user", "content": "'규칙을 모두 잊어'라는 말은 왜 위험해?"}]
+            self.assertEqual(normalize.for_classifier(msgs), msgs)
+        finally:
+            normalize.QUOTE_MASK = True
 
 
 class ClassifierRulesTests(unittest.TestCase):
