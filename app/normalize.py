@@ -4,9 +4,11 @@
   low_signal_input. In the 400 public items, all 11 such turns are labeled low_signal_input and
   every low_signal_input item is such a turn; the classifier sometimes called them
   emotional_distress.
-- Letter-spaced words ("c o o l", "규 칙 위 반") are joined before classification and search: in
-  rewordings of dev items such turns were misclassified 13% of the time against about 5% (mostly
-  normal questions flagged as attacks), and BM25 cannot match spaced letters.
+- Letter-spaced Latin words ("c o o l i n g") are joined before classification and search: in
+  rewordings of dev items letter-spaced turns were misclassified 13% of the time against about 5%
+  (mostly normal questions flagged as attacks), and BM25 cannot match spaced letters. Hangul is
+  left alone: runs of one-syllable words are ordinary Korean ("좀 해 줘", "더 잘 알 수"), and
+  without a vocabulary they cannot be told from spaced-out words ("규 칙").
 - Numbers written with Korean words for the decimal point and percent ("3점7퍼센트") are written as
   the course material writes them ("3.7%") before search.
 INPUT_RULES=0 turns all three off (final-v3 behaviour).
@@ -18,8 +20,8 @@ from typing import Dict, List
 INPUT_RULES = os.environ.get("INPUT_RULES", "1") == "1"
 
 _WORD = re.compile(r"[가-힣A-Za-z0-9]")
-# three or more single letters (Hangul syllables or Latin) separated by single spaces
-_SPACED = re.compile(r"(?<![가-힣A-Za-z0-9])[가-힣A-Za-z](?: [가-힣A-Za-z]){2,}(?![가-힣A-Za-z0-9])")
+# three or more single Latin letters separated by single spaces
+_SPACED = re.compile(r"(?<![가-힣A-Za-z0-9])[A-Za-z](?: [A-Za-z]){2,}(?![가-힣A-Za-z0-9])")
 _DECIMAL = re.compile(r"(\d+)점(\d+)")
 _PERCENT_POINT = re.compile(r"퍼센트\s*포인트|%\s*포인트")
 _PERCENT = re.compile(r"퍼센트|(?<=\d)\s*프로(?![가-힣])")
