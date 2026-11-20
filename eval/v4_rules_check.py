@@ -116,6 +116,40 @@ async def collect(path, concurrency):
     print(f"saved {path}, {len(res)} calls, {time.monotonic() - t:.0f} s")
 
 
+async def collect_arm(path, arm, rules_file, concurrency):
+    """Add one arm to an existing votes file: final-v3 prompt + the given rules text, or, for a file
+    named *.system.txt, that whole prompt."""
+    from app import classify, classify_feat, normalize
+    from app.llm import chat_json
+    from v3_votes_check import public_rows
+    text_in = Path(rules_file).read_text(encoding="utf-8")
+    if rules_file.endswith(".system.txt"):
+        system = text_in
+    else:
+        head, sep, tail = classify_feat.SYSTEM_BASE.rpartition("\n출력: JSON 객체 하나")
+        system = head.rstrip() + "\n" + text_in + sep + tail
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    sem = asyncio.Semaphore(concurrency)
+    kw = dict(effort=classify.EFFORT, max_tokens=classify.MAX_TOKENS, timeout=classify.TIMEOUT, hedge_after=7.0,
+              kind="classify")
+
+    async def vote(text):
+        async with sem:
+            try:
+                out = await chat_json(system, text, **kw)
+                return {"flags": {f: out.get(f) is True for f in classify_feat.FLAGS}}
+            except Exception:  # noqa: BLE001
+                return {"flags": None}
+
+    rows = [r for r in public_rows() if not normalize.is_low_signal(r["messages"])]
+    texts = [classify.render(normalize.for_classifier(r["messages"])) for r in rows]
+    res = await asyncio.gather(*[asyncio.gather(*[vote(t) for _ in range(3)]) for t in texts])
+    for r, v in zip(rows, res):
+        data[r["id"]][arm] = list(v)
+    Path(path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    print(f"added arm {arm}: {3 * len(rows)} calls, failed {sum(x['flags'] is None for v in res for x in v)}")
+
+
 def sign_p(a, b):
     n = a + b
     return 1.0 if not n else min(1.0, 2 * sum(math.comb(n, i) for i in range(min(a, b) + 1)) / 2 ** n)
@@ -134,8 +168,9 @@ def evaluate(path):
     def gold_block(r):
         return (r["decision"] == "block") if r["endpoint"] == "guard" else r["cat"] in BLOCK
 
+    arms = list(next(iter(data.values())).keys())
     preds = {}
-    for arm in ("today", "new"):
+    for arm in arms:
         p = {}
         for r in rows:
             if normalize.is_low_signal(r["messages"]):
@@ -149,7 +184,7 @@ def evaluate(path):
     for split in ("fewshot", "dev", "all"):
         sel = [r for r in rows if split == "all" or r["split"] == split]
         print(f"[{split}] {len(sel)} items")
-        for arm in ("today", "new"):
+        for arm in arms:
             p = preds[arm]
             exact = sum(p[r["id"]][0] == gold(r) for r in sel)
             tp = sum(p[r["id"]][0] in BLOCK and gold_block(r) for r in sel)
@@ -158,14 +193,15 @@ def evaluate(path):
             t = [tutor_ok(r, *p[r["id"]]) for r in sel if r["endpoint"] == "tutor"]
             line = (f"  {arm:6s} exact {exact:3d}  block F1 {2 * tp / max(1, 2 * tp + fp + fn):.3f} (wrong blocks {fp:2d}, "
                     f"missed attacks {fn:2d})  tutor action {sum(t)}/{len(t)}")
-            if arm == "new":
+            if arm != "today":
                 fixed = sum(preds["today"][r["id"]][0] != gold(r) and p[r["id"]][0] == gold(r) for r in sel)
                 broken = sum(preds["today"][r["id"]][0] == gold(r) and p[r["id"]][0] != gold(r) for r in sel)
                 line += f"  | fixed {fixed}, broken {broken} (p {sign_p(broken, fixed):.2f})"
             print(line)
-    print("\nitems that change (ids only)")
+    last = arms[-1]
+    print(f"\nitems that change, today -> {last} (ids only)")
     for r in rows:
-        a, b = preds["today"][r["id"]][0], preds["new"][r["id"]][0]
+        a, b = preds["today"][r["id"]][0], preds[last][r["id"]][0]
         if a != b:
             mark = "fixed" if b == gold(r) else ("broken" if a == gold(r) else "other")
             print(f"  {r['split']:7s} {r['endpoint']:5s} {r['id']} gold {r['cat']:20s} {a:20s} -> {b:20s} {mark}")
@@ -177,11 +213,14 @@ def main():
     ap.add_argument("--eval")
     ap.add_argument("--concurrency", type=int, default=16)
     ap.add_argument("--check", action="store_true", help="overlap check of the added text (no calls)")
+    ap.add_argument("--add-arm", nargs=3, metavar=("VOTES", "ARM", "RULES_FILE"))
     a = ap.parse_args()
     if a.check:
         print("14-char overlaps with public items:", overlaps())
     elif a.collect:
         asyncio.run(collect(a.collect, a.concurrency))
+    elif a.add_arm:
+        asyncio.run(collect_arm(*a.add_arm, a.concurrency))
     elif a.eval:
         evaluate(a.eval)
 

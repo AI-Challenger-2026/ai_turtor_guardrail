@@ -74,8 +74,20 @@ async def trace_once(messages, sem):
         return {"votes": votes, "pre": pre, "found": found, "category": category, "decision": decision}
 
 
-async def collect(out_path, run_paths, k, concurrency):
-    ids = flaky_ids(run_paths)
+def use_rules(rules_file):
+    """Swap the classifier's added rules for a candidate text (eval only)."""
+    if rules_file:
+        from app import classify_feat
+        classify_feat.REQUEST_RULES = Path(rules_file).read_text(encoding="utf-8")
+        classify_feat.SYSTEM = classify_feat.with_rules(classify_feat.SYSTEM_BASE)
+
+
+async def collect(out_path, run_paths, k, concurrency, ids_from=None, rules_file=None):
+    use_rules(rules_file)
+    if ids_from:
+        ids = {d["id"] for d in json.loads(Path(ids_from).read_text(encoding="utf-8"))}
+    else:
+        ids = flaky_ids(run_paths)
     rows = [json.loads(l) for l in (ROOT / "public/guard.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     rows = [r for r in rows if r["id"] in ids]
     sem = asyncio.Semaphore(concurrency)
@@ -133,9 +145,11 @@ def main():
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--eval")
+    ap.add_argument("--ids-from", help="trace file whose item ids to reuse")
+    ap.add_argument("--rules-file", help="candidate text for app.classify_feat.REQUEST_RULES")
     a = ap.parse_args()
     if a.collect:
-        asyncio.run(collect(a.collect, a.runs, a.k, a.concurrency))
+        asyncio.run(collect(a.collect, a.runs, a.k, a.concurrency, a.ids_from, a.rules_file))
     elif a.eval:
         evaluate(a.eval)
 
