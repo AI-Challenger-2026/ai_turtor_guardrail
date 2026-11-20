@@ -627,5 +627,14 @@ class NormalizeTests(unittest.TestCase):
         self.assertTrue(all(normalize.has_words(t) for t in ("ㅠㅠ 어려워", "a??", "1", "왜??")))
 
 
+
+class ClassifierRulesTests(unittest.TestCase):
+    def test_request_rules_are_in_the_prompt_before_the_output_line(self):
+        self.assertIn("판단 방법(낱말이 아니라 요청으로)", classify_feat.SYSTEM)
+        self.assertNotIn("판단 방법", classify_feat.SYSTEM_BASE)
+        self.assertLess(classify_feat.SYSTEM.index("판단 방법"), classify_feat.SYSTEM.index("\n출력: JSON 객체 하나"))
+        self.assertEqual(classify_feat.with_rules(classify_feat.SYSTEM_BASE), classify_feat.SYSTEM)
+
+
 if __name__ == "__main__":
     unittest.main()

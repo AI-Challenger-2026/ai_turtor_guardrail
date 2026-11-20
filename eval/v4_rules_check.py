@@ -58,7 +58,7 @@ ADDED = """
 
 
 def new_system():
-    from app.classify_feat import SYSTEM
+    from app.classify_feat import SYSTEM_BASE as SYSTEM  # final-v3's prompt; the server now adds ADDED itself
     head, sep, tail = SYSTEM.rpartition("\n출력: JSON 객체 하나")
     assert sep, "classify_feat.SYSTEM changed"
     return head.rstrip() + "\n" + ADDED + sep + tail
@@ -80,7 +80,7 @@ async def collect(path, concurrency):
     from app.llm import chat_json
     from v3_votes_check import public_rows
     rows = public_rows()
-    arms = {"today": classify_feat.SYSTEM, "new": new_system()}
+    arms = {"today": classify_feat.SYSTEM_BASE, "new": new_system()}  # "today" = the prompt before 2026-11-20
     sem = asyncio.Semaphore(concurrency)
     kw = dict(effort=classify.EFFORT, max_tokens=classify.MAX_TOKENS, timeout=classify.TIMEOUT, hedge_after=7.0,
               kind="classify")

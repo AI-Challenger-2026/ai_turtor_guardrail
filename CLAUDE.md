@@ -46,6 +46,7 @@
     answer 모드의 found 답변 끝에는 1위 섹션 원문 문장(최대 2개, `app/excerpt.py`, `EXCERPT` 기본 1)을 붙인다(우리가 더함).
   - /guard: 분류, 후보 답변 검증, 자료 확인(생성기 found)을 동시에. off_topic + found → normal. block이면 후보 답변 `{grounded: true, [], safe: false}`, allow면 검증 구간(없으면 grounded). 후보 답변 없이 normal인데 found=false면 out_of_material(decision은 allow).
 - `app/classify.py` + `app/classify_feat.py`: 예/아니오 신호 9개(self_pii, distress, jailbreak, harm, hate, submit_work, answer_only, off_topic, low_signal)를 3회 동시 판정, 신호별 과반 → 코드 우선순위 규칙으로 범주. 프롬프트 예시는 팀원이 쓴 문장(공개 문항 아님). 모두 실패하면 normal(flags 없음). low, 시도당 20초, 7초 헤지.
+  판정 규칙(우리가 더함, `CLASSIFY_RULES` 기본 1, 0이면 final-v3 프롬프트 `SYSTEM_BASE`): "낱말이 아니라 요청한 결과물과 대상으로 판단" 원칙 4줄과 새로 쓴 대비 예시 6개를 출력 줄 앞에 붙인다(`REQUEST_RULES`).
 - `app/answer.py`: 생성 프롬프트(concise_full: 근거 문장을 통째로 옮김), 모드 answer/scaffold/academic. 힌트·대필 문구(우리가 바꿈, `HINT_PROMPT` 기본 clean, v3이면 final-v3): 첫 문장을 그대로 주고, 이 모드에서는 answer 모드의 found 규칙을 보이지 않는다. `{"evidence","found","answer"}`, evidence가 보여 준 섹션이 아니면 found=false. 9초 헤지.
   자료 없음 답변(우리가 더함, `FOUND_MODE` 기본 plain, model이면 final-v3 문구): answer 모드에서 found=false 답변에 자료의 값·규칙·이름을 덧붙이지 않는다(abstain은 인용이 없어 덧붙인 사실이 근거 없음으로 판정됨).
 - `app/verify.py`: 후보 답변의 과목 고유 사실 주장을 자료(후보 답변 가중 검색 상위 4섹션)와 대조, contradict·absent의 wrong_part를 구간으로. 후보 답변에 없는 구간, 응대·안내 문장(`_NON_CLAIM`)에 걸린 구간은 버린다.
@@ -296,7 +297,7 @@ python3 eval/log_summary.py logs/8000.log --last-run
   4회 실행에서 판정 오답 33번 중 21번이 매번은 아닌 문항에서 나왔다. 틀린 50번의 원인: 판정기 다수결 흔들림 19, 판정기가 늘 같은 쪽으로 틀림 17, 자료 확인(found) 흔들림 7(범주만), off_topic 재확인 2.
   흔들리는 문항은 표당 확률이 50% 근처에서 양쪽에 고루 있다. 문항당 15표로 표 수를 바꿔 다시 뽑으면 맞힌 판정 12.05(1표) / 12.07(3표) / 11.88(15표) / 11.71(31표) / 20.
   흔들림을 없애면 다수 쪽으로 고정될 뿐이라 점수는 안 오른다(표 늘리기 실패의 이유). 오르려면 그 문항의 표당 정답 확률이 바뀌어야 한다.
-- "낱말이 아니라 요청으로" 판단 규칙 + 대비 예시(11/20, `eval/v4_rules_check.py`, 400건 × 두 프롬프트 × 3표 = 2,334회, 규칙은 예시용 절반만 보고 작성) 채택 안 함:
+- "낱말이 아니라 요청으로" 판단 규칙 + 대비 예시(11/20, `eval/v4_rules_check.py`, 400건 × 두 프롬프트 × 3표 = 2,334회, 규칙은 예시용 절반만 보고 작성): 미리 정한 기준(평가용 고침 ≥ 망침)에는 못 미쳤으나 로컬 최고점을 우선한 팀 결정으로 채택(`CLASSIFY_RULES`). 서버 프롬프트 = 시험한 프롬프트(글자 단위 일치), 스모크 18/18.
   예시용 187 → 191, 평가용 190 → 189(고침 5, 망침 6), 전체 377 → 380. 탈옥 규칙은 대상(4bdbbc40) 탈옥 표 2/3 → 3/3에 정상 2건을 새로 막았고, 대필 규칙은 대상 3/3 → 3/3로 효과 없음.
   유해 규칙(사기 수법이 나와도 사실·구별법·대처법이면 정상)만 표를 움직였다: 대상 0d371526 3/3 → 1/3, 평가용 806d1a45 2/3 → 1/3 고침, 평가용 공격 7c5ea4c7 3/3 → 1/3 놓침.
 
