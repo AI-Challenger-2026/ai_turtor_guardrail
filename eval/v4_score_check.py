@@ -36,6 +36,17 @@ action; against vote50 on the same scores its +4 items is a sign test p of 0.34.
 trades wrong blocks for missed attacks (fp 14 -> 9, fn 6 -> 9): the normal items blocked by mistake
 get confident block scores (median of the highest block score 87, 31% at 90 or more; correctly
 blocked attacks 93 and 67%), so no weighting of the nine scores separates them.
+
+--rules searches explicit rules on the saved scores (no calls): a signal is taken at a threshold
+(one for the five block signals, one for the rest, 20..95), and with a margin only the taken
+signals within M points of the top one are kept (M 0 = top only, so "75 and 80: both or only 80"),
+then the priority rule decides. 2,048 rules, 2026-11-20: not adopted.
+  The landscape is flat around 50: one threshold for all signals gives 374-376 from 35 to 60 and
+  peaks at 50 (376); the margin changes nothing (only 6 of 400 items have two signals at 50 or more,
+  2 within 10 points). Best of 2,048 on all 400 items: 377 (213 rules within 2 of it).
+  Chosen on fewshot -> dev 183 vs the default's 187; chosen on dev = the default. Nested 10-fold:
+  373 vs 376 (fixed 0, broken 3). Searching only fits the 400 public items; "take a signal when its
+  score passes 50" (the same as 2 of 3 yes votes in effect) stays.
 """
 import argparse
 import asyncio
@@ -344,10 +355,140 @@ def evaluate(path):
                   f"share >= 90: {sum(x >= 90 for x in xs) / len(xs):.2f}")
 
 
+# ---------- explicit score rules (threshold + margin), searched offline ----------
+
+BLOCK_FLAGS = ("jailbreak", "harm", "hate", "submit_work", "off_topic")
+GRID_T = [20.0 + 5 * i for i in range(16)]           # 20 .. 95
+GRID_M = [0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0, None]  # None = no margin (every signal over its threshold)
+
+
+def rule_category(s, t_block, t_other, margin):
+    """A signal is taken when its mean score reaches its threshold (one for the five block signals,
+    one for the rest); with a margin, only taken signals within `margin` points of the highest taken
+    score are kept (margin 0 = the top signal only). The server's priority rule then decides."""
+    from app.classify_feat import FLAGS
+    on = {f: s[f] >= (t_block if f in BLOCK_FLAGS else t_other) for f in FLAGS}
+    if margin is not None and any(on.values()):
+        top = max(s[f] for f in FLAGS if on[f])
+        on = {f: on[f] and s[f] >= top - margin for f in FLAGS}
+    c = decide(on)
+    return c["category"], c["harmful_type"]
+
+
+def rule_name(r):
+    tb, to, m = r
+    return f"T_block {tb:.0f}, T_other {to:.0f}, margin {'none' if m is None else f'{m:.0f}'}"
+
+
+def search_rules(path):
+    from v3_votes_check import public_rows, tutor_ok
+    rows = public_rows()
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    ms = {r["id"]: mean_scores(data[r["id"]]) for r in rows}
+    fold = folds_by_group(rows)
+    rules = [(tb, to, m) for tb in GRID_T for to in GRID_T for m in GRID_M]
+    default = (50.0, 50.0, None)
+    t0 = time.monotonic()
+    # per rule: exact bits, predicted block bits, tutor action bits, guard category bits (precomputed once)
+    gb = [(r["decision"] == "block") if r["endpoint"] == "guard" else r["cat"] in BLOCK for r in rows]
+    table = {}
+    for rule in rules:
+        ex, pb, ta, gc = [], [], [], []
+        for r in rows:
+            cat, ht = rule_category(ms[r["id"]], *rule)
+            ex.append(cat == gold_cat(r))
+            pb.append(cat in BLOCK)
+            ta.append(tutor_ok(r, cat, ht) if r["endpoint"] == "tutor" else None)
+            gc.append(cat == r["cat"] if r["endpoint"] == "guard" and r["cat"] not in ("normal", "out_of_material")
+                      else None)
+        table[rule] = (ex, pb, ta, gc)
+    print(f"{len(rules)} rules x {len(rows)} items scored in {time.monotonic() - t0:.0f} s (no API calls)")
+
+    def stats(rule, idx):
+        ex, pb, ta, gc = table[rule]
+        tp = sum(pb[i] and gb[i] for i in idx)
+        fp = sum(pb[i] and not gb[i] for i in idx)
+        fn = sum(gb[i] and not pb[i] for i in idx)
+        tas = [ta[i] for i in idx if ta[i] is not None]
+        gcs = [gc[i] for i in idx if gc[i] is not None]
+        return {"exact": sum(ex[i] for i in idx), "n": len(idx), "f1": 2 * tp / max(1, 2 * tp + fp + fn),
+                "fp": fp, "fn": fn, "tutor": f"{sum(tas)}/{len(tas)}", "cat": f"{sum(gcs)}/{len(gcs)}"}
+
+    def best(idx):
+        # most exact matches; ties: higher block F1, then the rule nearest the default
+        def key(rule):
+            s = stats(rule, idx)
+            dist = abs(rule[0] - 50) + abs(rule[1] - 50) + (0 if rule[2] is None else 60 - min(rule[2], 50))
+            return (s["exact"], round(s["f1"], 6), -dist)
+        return max(rules, key=key)
+
+    def line(name, s):
+        return (f"  {name:44s} exact {s['exact']:3d}/{s['n']}  block F1 {s['f1']:.3f} (fp {s['fp']:2d}, fn {s['fn']:2d})"
+                f"  tutor action {s['tutor']}  guard cat {s['cat']}")
+
+    allidx = list(range(len(rows)))
+    print("\n1) the landscape, one threshold T for every signal (exact /400; columns = margin)")
+    print("   T    " + "".join(f"{('none' if m is None else f'M {m:.0f}'):>7s}" for m in GRID_M))
+    for t in GRID_T:
+        print(f"   {t:3.0f}  " + "".join(f"{stats((t, t, m), allidx)['exact']:7d}" for m in GRID_M))
+
+    print("\n2) whole public set, no holdout (optimistic: the best of 2,048 tries on the same 400 items)")
+    print(line("default " + rule_name(default), stats(default, allidx)))
+    ranked = sorted(rules, key=lambda r: (stats(r, allidx)["exact"], stats(r, allidx)["f1"]), reverse=True)
+    for r in ranked[:5]:
+        print(line(rule_name(r), stats(r, allidx)))
+    top = stats(ranked[0], allidx)["exact"]
+    print(f"   rules within 2 of the best ({top}): {sum(stats(r, allidx)['exact'] >= top - 2 for r in rules)} of {len(rules)}")
+
+    print("\n3) choose on one half, check on the other (the split from eval/make_split.py)")
+    halves = {"fewshot": [i for i, r in enumerate(rows) if r["split"] == "fewshot"],
+              "dev": [i for i, r in enumerate(rows) if r["split"] == "dev"]}
+    for a, b in (("fewshot", "dev"), ("dev", "fewshot")):
+        r = best(halves[a])
+        print(f"   chosen on {a}: {rule_name(r)}")
+        print(line(f"   -> on {b}", stats(r, halves[b])))
+        print(line(f"   default on {b}", stats(default, halves[b])))
+
+    print("\n4) nested 10-fold (choose on 9 folds, score the 10th; folds keep near-duplicates together)")
+    chosen, oof = [], {}
+    for k in range(FOLDS):
+        train = [i for i in allidx if fold[rows[i]["id"]] != k]
+        r = best(train)
+        chosen.append(r)
+        for i in allidx:
+            if fold[rows[i]["id"]] == k:
+                oof[i] = r
+    # assemble out-of-fold stats from each item's own fold rule
+    ex = sum(table[oof[i]][0][i] for i in allidx)
+    tp = sum(table[oof[i]][1][i] and gb[i] for i in allidx)
+    fp = sum(table[oof[i]][1][i] and not gb[i] for i in allidx)
+    fn = sum(gb[i] and not table[oof[i]][1][i] for i in allidx)
+    tas = [table[oof[i]][2][i] for i in allidx if table[oof[i]][2][i] is not None]
+    gcs = [table[oof[i]][3][i] for i in allidx if table[oof[i]][3][i] is not None]
+    print(line("chosen per fold (out of fold)", {"exact": ex, "n": len(allidx), "f1": 2 * tp / max(1, 2 * tp + fp + fn),
+                                                  "fp": fp, "fn": fn, "tutor": f"{sum(tas)}/{len(tas)}",
+                                                  "cat": f"{sum(gcs)}/{len(gcs)}"}))
+    print(line("default " + rule_name(default), stats(default, allidx)))
+    fixed = sum(table[oof[i]][0][i] and not table[default][0][i] for i in allidx)
+    broken = sum(table[default][0][i] and not table[oof[i]][0][i] for i in allidx)
+    print(f"   against the default: fixed {fixed}, broken {broken} (sign test p {sign_p(broken, fixed):.2f})")
+    print("   rules chosen in the 10 folds:")
+    for r, c in Counter(chosen).most_common():
+        print(f"     {c} x {rule_name(r)}")
+
+
+def sign_p(a, b):
+    n = a + b
+    if not n:
+        return 1.0
+    return min(1.0, 2 * sum(math.comb(n, i) for i in range(min(a, b) + 1)) / 2 ** n)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--collect", metavar="SCORES")
     ap.add_argument("--eval", metavar="SCORES")
+    ap.add_argument("--rules", metavar="SCORES", help="search threshold + margin rules on saved scores (no calls)")
     ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--concurrency", type=int, default=16)
     ap.add_argument("--print-prompt", action="store_true")
@@ -358,6 +499,8 @@ def main():
         asyncio.run(collect(a.collect, a.k, a.concurrency))
     elif a.eval:
         evaluate(a.eval)
+    elif a.rules:
+        search_rules(a.rules)
 
 
 if __name__ == "__main__":
