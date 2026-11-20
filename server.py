@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+
 from app import logs
 from app.answer import grounded_answer
 from app.excerpt import EXCERPT_HEAD, with_excerpt

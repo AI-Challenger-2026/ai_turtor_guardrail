@@ -15,6 +15,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from . import normalize
+
 KB_DIR = Path(__file__).resolve().parents[1] / "kb"
 
 
@@ -121,6 +123,7 @@ class KB:
         """BM25 섹션 순위. 점수는 final-v3와 같은 RRF 값(1/(k+순위))이라 순서는 BM25 그대로.
         bilingual=True ranks with the Korean + English index when it was built (English questions)."""
         bm = self.bm25_bi if bilingual and self.bm25_bi is not None else self.bm25
+        query = normalize.for_search(query)  # letter-spaced words joined, "3점7퍼센트" -> "3.7%"
         fused = defaultdict(float)
         lists = [(self._section_scores(bm.scores(query)), w_bm25)]
         for scores, w in lists:
