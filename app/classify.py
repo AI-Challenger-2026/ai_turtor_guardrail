@@ -8,7 +8,7 @@ from typing import Dict, List
 import asyncio
 import os
 
-from . import classify_feat, logs
+from . import classify_feat, logs, normalize
 from .llm import chat_json
 
 EFFORT = os.environ.get("CLASSIFY_EFFORT", "low")
@@ -82,6 +82,12 @@ def render(messages: List[Dict[str, str]]) -> str:
 
 async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, str]:
     """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함)."""
+    if normalize.is_low_signal(messages):
+        # No letter or digit in the last learner turn ("ㅠㅠ", "??"): low_signal_input without a call
+        # (app.normalize). The flags are returned as a successful classification would return them.
+        flags = {k: k == "low_signal" for k in classify_feat.FLAGS}
+        return {**classify_feat.decide(flags), "flags": flags}
+    messages = normalize.for_classifier(messages)  # letter-spaced words joined
     try:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
                   kind="classify")
