@@ -136,6 +136,13 @@ SUBMIT_WORDS = re.compile(r"수행\s*평가|숙제|과제|제출|답안|시험|�
 SUBMIT_STRONG = re.compile(
     r"(수행\s*평가|숙제|과제)(에|로|용)?\s*(낼|넣을|제출할)\s|제출할\s*(완성\s*)?(코드|답|글|보고서|설명|report|code)"
     r"|제출용|제출\s*답안|답안으로|답안\s*전체|완성\s*답안|보고서\s*전체|완성\s*report|for submission|graded", re.I)
+# Asking to find out another person's personal details (the last turn only). Public set: all 8
+# matches are harmful_content (4 fewshot, 4 dev split), no other category. "알아내려는" (learning how
+# a scam tries to find things out) is excluded.
+OTHERS_INFO = re.compile(
+    r"(다른\s*(학생|친구|사람|반)|친구|짝꿍|반\s*친구|걔|그\s*애|선배|후배)[^\n]{0,15}?"
+    r"(이름|학교|연락처|전화\s*번호|번호|주소|사는\s*곳|집|성적|계좌|거래\s*내역|비밀번호)[^\n]{0,12}?"
+    r"(알아내|찾아내|캐내|캐\s)(?!려)")
 # A learner giving their own name (school + grade + name, or "my name is"). Public set: all 15 matches
 # are pii_disclosure. Used only when no flag fired.
 _NAME_END = r"(?:이야|야|이에요|예요|입니다|이고|인데|고|이며)"
@@ -145,12 +152,15 @@ SELF_INTRO = re.compile(r"(?:^|\s)(?:나는|난|나|저는|전|저)\s+[^\n]{0,20
                         + r"|(?:내|제)\s*이름은\s*[가-힣]{1,5}" + _NAME_END)
 
 
-def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False) -> Dict[str, str]:
+def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False, last: str = "") -> Dict[str, str]:
     """신호 → 범주. 우선순위는 공개 세트에서 관찰한 라벨 관계를 따른다.
-    text: the learner's own turns as sent (wording rules); strong_submit: tutor only."""
+    text: the learner's own turns as sent, last: the last learner turn (wording rules);
+    strong_submit: tutor only."""
     rules = TEXT_RULES and bool(text)
     if rules and strong_submit and SUBMIT_STRONG.search(text):
         f = {**f, "submit_work": True}
+    if rules and last and OTHERS_INFO.search(last):
+        f = {**f, "harm": True}
     if f.get("distress"):
         return {"category": "emotional_distress", "harmful_type": "none"}
     if f.get("low_signal"):
@@ -161,7 +171,9 @@ def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False) -> D
         return {"category": "harmful_content", "harmful_type": "harm"}
     if f.get("hate"):
         return {"category": "harmful_content", "harmful_type": "hate"}
-    if f.get("submit_work") and not (rules and f.get("self_pii") and not SUBMIT_WORDS.search(text)):
+    # Academic dishonesty needs submission wording: all 15 public items have it in the last turn.
+    # Without it a submit_work vote (a code request, often with a self-introduction) falls through.
+    if f.get("submit_work") and not (rules and not SUBMIT_WORDS.search(text) and not SUBMIT_STRONG.search(text)):
         return {"category": "academic_dishonesty", "harmful_type": "none"}
     if f.get("off_topic"):
         return {"category": "off_topic", "harmful_type": "none"}
@@ -174,6 +186,6 @@ def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False) -> D
     return {"category": "normal", "harmful_type": "none"}
 
 
-def parse(out: dict, text: str = "", strong_submit: bool = False) -> Dict[str, str]:
+def parse(out: dict, text: str = "", strong_submit: bool = False, last: str = "") -> Dict[str, str]:
     flags = {k: out.get(k) is True for k in FLAGS}
-    return {**decide(flags, text, strong_submit), "flags": flags}
+    return {**decide(flags, text, strong_submit, last), "flags": flags}

@@ -49,7 +49,7 @@
   판정 규칙(우리가 더함, `CLASSIFY_RULES` 기본 1, 0이면 final-v3 프롬프트 `SYSTEM_BASE`): "낱말이 아니라 요청한 결과물과 대상으로 판단" 원칙 4줄과 새로 쓴 대비 예시 6개를 출력 줄 앞에 붙인다(`REQUEST_RULES`).
   섞은 투표(우리가 더함, `CLASSIFY_VOTES_EN` 기본 2, 0이면 한국어 3표): 한국어 프롬프트 3표 + 영어 프롬프트(`SYSTEM_EN`, 설명은 영어·예시 문장은 한국어) 2표를 동시에 보내 신호별 과반(5표 중 3).
   모든 신호의 과반이 정해지면 남은 표를 취소한다(`settled_votes`, 다 기다린 것과 같은 결과). 영어 표는 헤지 없음(로그 kind `classify_en`). 한 표라도 실패하면 모두 기다려 돌아온 표의 과반.
-  문형 규칙(우리가 더함, `origin/wonwoo-v4` 이식, `CLASSIFY_TEXT_RULES` 기본 1): 투표 뒤 원래 학습자 발화(미끼 말 지우기 전)에 정규식만 적용. 자기소개 + 대필 신호인데 제출 표현(`SUBMIT_WORDS`)이 없으면 pii, 명시적 제출 표현(`SUBMIT_STRONG`)이면 대필(튜터만), 신호가 하나도 없는데 자기소개 문형(`SELF_INTRO`)이면 pii.
+  문형 규칙(우리가 더함, `origin/wonwoo-v4` 이식, `CLASSIFY_TEXT_RULES` 기본 1): 투표 뒤 원래 학습자 발화(미끼 말 지우기 전)에 정규식만 적용. 대필 신호는 제출 표현(`SUBMIT_WORDS`·`SUBMIT_STRONG`)이 있을 때만 대필(없으면 아래 신호·자기소개로 내려감), 명시적 제출 표현(`SUBMIT_STRONG`)이면 대필(튜터만), 마지막 발화가 남의 신상 캐기 문형(`OTHERS_INFO`, "-려는" 제외)이면 harm, 신호가 하나도 없는데 자기소개 문형(`SELF_INTRO`)이면 pii.
 - `app/answer.py`: 생성 프롬프트(concise_full: 근거 문장을 통째로 옮김), 모드 answer/scaffold/academic. 힌트·대필 문구(우리가 바꿈, `HINT_PROMPT` 기본 clean, v3이면 final-v3): 첫 문장을 그대로 주고, 이 모드에서는 answer 모드의 found 규칙을 보이지 않는다. `{"evidence","found","answer"}`, evidence가 보여 준 섹션이 아니면 found=false. 9초 헤지.
   자료 없음 답변(우리가 더함, `FOUND_MODE` 기본 plain, model이면 final-v3 문구): answer 모드에서 found=false 답변에 자료의 값·규칙·이름을 덧붙이지 않는다(abstain은 인용이 없어 덧붙인 사실이 근거 없음으로 판정됨).
 - `app/verify.py`: 후보 답변의 과목 고유 사실 주장을 자료(후보 답변 가중 검색 상위 4섹션)와 대조, contradict·absent의 wrong_part를 구간으로. 후보 답변에 없는 구간, 응대·안내 문장(`_NON_CLAIM`)에 걸린 구간은 버린다.
@@ -332,6 +332,9 @@ python3 eval/log_summary.py logs/8000.log --last-run
 
 - 문형 규칙 이식(11/20, `wonwoo-v4`의 세 규칙, 호출 0 검증): 공개 400건에서 `SUBMIT_STRONG`(튜터) 걸림 8건 모두 정답 대필, `SELF_INTRO` 15건 모두 정답 개인정보, 정답 대필 15건은 모두 `SUBMIT_WORDS`를 포함해 pii 우선 규칙이 대필을 바꿀 경로 없음. `docs/FLAKY_ITEMS.md`의 22건 중 6건(가드 5·7·8, 튜터 4·5·8)이 대상.
   8001: 오프라인 테스트 98개, 스모크 18/18, 대상 6건 + 반대 사례 1건 모두 정답, 로그 감사 0줄. `SUBMIT_STRONG`은 공개 문항을 보고 만든 규칙이라 공개 이득은 과대평가(11/13 공식 22회에서 튜터 약 +0.7).
+
+- 문형 규칙 추가(11/20, 호출 0 검증): (A) 대필은 제출 표현이 있을 때만 — 정답 대필 15건(예시용 8, 평가용 7) 모두 마지막 발화에 제출 표현, 빠지는 대필 0. (B) 남의 신상 캐기(마지막 발화) → harm — 공개 걸림 8건 모두 정답 유해(예시용 4, 평가용 4), 다른 범주 0. 대상 `docs/FLAKY_ITEMS.md` 튜터 9, 가드 11.
+  오프라인 테스트 103개, 8001 스모크 18/18, 대상 2건 + 앞선 대상 4건 정답(1회), 로그 감사 0줄. 기대 효과는 공개 기준 약 1건 분량이라 작다.
 
 ## 6. 확정된 설계 결정
 

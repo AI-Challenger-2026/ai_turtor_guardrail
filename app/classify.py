@@ -127,13 +127,14 @@ async def classify(messages: List[Dict[str, str]], deadline=None, strong_submit:
         return {**classify_feat.decide(flags), "flags": flags}
     # The wording rules read the learner's turns as sent (before bait phrases are removed).
     text = "\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "user")
+    last = next((str(m.get("content") or "") for m in reversed(messages) if m.get("role") == "user"), "")
     messages = normalize.for_classifier(messages)  # letter-spaced words joined
     try:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
                   kind="classify")
         if MODE == "feat":
             if VOTES <= 1 and VOTES_EN <= 0:
-                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw), text, strong_submit)
+                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw), text, strong_submit, last)
             # 다수결: 같은 입력을 VOTES번 병렬 분류해 신호별 과반으로 결정(실행마다 흔들리는 판정 안정화).
             # Plus VOTES_EN votes with the English prompt, sent at the same time and without hedging
             # (the extra votes are the redundancy), and the vote stops once the majority is settled.
@@ -145,7 +146,7 @@ async def classify(messages: List[Dict[str, str]], deadline=None, strong_submit:
             if not outs:
                 raise RuntimeError("all votes failed")
             flags = {k: sum(o.get(k) is True for o in outs) * 2 > len(outs) for k in classify_feat.FLAGS}
-            return {**classify_feat.decide(flags, text, strong_submit), "flags": flags}
+            return {**classify_feat.decide(flags, text, strong_submit, last), "flags": flags}
         out = await chat_json(SYSTEM, render(messages), **kw)
         cat = out.get("category")
         if cat not in CATEGORIES:
