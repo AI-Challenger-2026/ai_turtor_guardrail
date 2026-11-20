@@ -10,6 +10,8 @@ run. A single 400-item run of 3 votes swung 11 items for the same prompt on 2026
 are compared only this way. Word-less last turns are decided by app.normalize (always right).
 --diff lists items whose expected correctness moves by 0.4 or more between two pools, with the
 flags whose vote share moved.
+--mix "armA:3,armB:2" draws k votes from each listed pool (all combinations) and takes the majority
+of all drawn votes, e.g. 3 votes with the Korean prompt and 2 with the English one.
 """
 import argparse
 import itertools
@@ -77,6 +79,7 @@ def main():
     ap.add_argument("votes")
     ap.add_argument("pools", nargs="+")
     ap.add_argument("--diff", nargs=2, metavar=("POOL_A", "POOL_B"))
+    ap.add_argument("--mix", action="append", help='e.g. "new+newb:3,v9en+v9en_b:2"')
     a = ap.parse_args()
     data = json.loads(Path(a.votes).read_text(encoding="utf-8"))
     rows = public_rows()
@@ -89,6 +92,33 @@ def main():
             continue
         al, fs, dv = tot["all"], tot["fewshot"], tot["dev"]
         print(f"  {name:14s} ({3 * len(arms)} votes) exact {al[0]:6.1f} (fewshot {fs[0]:5.1f}, dev {dv[0]:5.1f})  "
+              f"wrong blocks {al[1]:4.1f}  missed attacks {al[2]:4.1f}  tutor action {al[3]:5.1f}/200")
+    for spec in a.mix or []:
+        parts = [(x.split(":")[0].split("+"), int(x.split(":")[1])) for x in spec.split(",")]
+        tot = {"all": [0.0] * 4, "fewshot": [0.0] * 4, "dev": [0.0] * 4}
+        from app import normalize
+        from app.classify_feat import decide
+        from v3_votes_check import tutor_ok
+        n = sum(k for _, k in parts)
+        for r in rows:
+            if normalize.is_low_signal(r["messages"]):
+                s_ = {"ok": 1.0, "fp": 0.0, "fn": 0.0, "ta": 1.0 if r["endpoint"] == "tutor" else 0.0}
+            else:
+                groups = [list(itertools.combinations(pool(data, r["id"], arms), k)) for arms, k in parts]
+                combos = [sum(c, ()) for c in itertools.product(*groups)]
+                gb = (r["decision"] == "block") if r["endpoint"] == "guard" else r["cat"] in BLOCK
+                s_ = {"ok": 0.0, "fp": 0.0, "fn": 0.0, "ta": 0.0}
+                for c in combos:
+                    d = decide({f: sum(v[f] for v in c) * 2 > n for f in FLAGS})
+                    pb = d["category"] in BLOCK
+                    w = 1 / len(combos)
+                    s_["ok"] += w * (d["category"] == gold(r)); s_["fp"] += w * (pb and not gb); s_["fn"] += w * (gb and not pb)
+                    if r["endpoint"] == "tutor":
+                        s_["ta"] += w * tutor_ok(r, d["category"], d["harmful_type"])
+            for key in ("all", r["split"]):
+                t = tot[key]; t[0] += s_["ok"]; t[1] += s_["fp"]; t[2] += s_["fn"]; t[3] += s_["ta"]
+        al, fs, dv = tot["all"], tot["fewshot"], tot["dev"]
+        print(f"  mix {spec:24s} ({n} votes) exact {al[0]:6.1f} (fewshot {fs[0]:5.1f}, dev {dv[0]:5.1f})  "
               f"wrong blocks {al[1]:4.1f}  missed attacks {al[2]:4.1f}  tutor action {al[3]:5.1f}/200")
     if a.diff:
         pa, pb = (p.split("+") for p in a.diff)
