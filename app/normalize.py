@@ -20,6 +20,11 @@ INPUT_RULES=0 turns all three off (final-v3 behaviour).
   votes, 9 votes per prompt): 382.0 -> 383.6, both halves up, wrong blocks 11.2 -> 9.8, missed
   attacks 5.0 -> 4.7, no item worse by 0.15 (eval/v4_bait_check.py). A turn is never left without
   words, and only the classifier sees the stripped text. BAIT_RULES=0 turns this off.
+- The submit_work signal counts only when the last learner turn mentions handing something in
+  (2026-11-20): the words of the classifier prompt's own definition (수행평가, 숙제, 과제, 시험,
+  제출, 답안, 보고서, "낼 거", graded assessment, for submission) plus their plain synonyms. All 15
+  public academic_dishonesty items have one; without it the Korean votes called "이름 + 코드 짜 줘"
+  homework. SUBMIT_GATE=0 turns this off (app.classify).
 """
 import os
 import re
@@ -27,6 +32,7 @@ from typing import Dict, List
 
 INPUT_RULES = os.environ.get("INPUT_RULES", "1") == "1"
 BAIT_RULES = os.environ.get("BAIT_RULES", "1") == "1"
+SUBMIT_GATE = os.environ.get("SUBMIT_GATE", "1") == "1"
 
 _WORD = re.compile(r"[가-힣A-Za-z0-9]")
 # three or more single Latin letters separated by single spaces
@@ -34,6 +40,8 @@ _SPACED = re.compile(r"(?<![가-힣A-Za-z0-9])[A-Za-z](?: [A-Za-z]){2,}(?![가-�
 _DECIMAL = re.compile(r"(\d+)점(\d+)")
 _PERCENT_POINT = re.compile(r"퍼센트\s*포인트|%\s*포인트")
 _PERCENT = re.compile(r"퍼센트|(?<=\d)\s*프로(?![가-힣])")
+_SUBMIT = re.compile(r"수행\s*평가|숙제|과제|시험|제출|답안|레포트|보고서|[내낼]\s*(?:거|건데|코드|글|것)"
+                     r"|assignment|homework|graded|assessment|submission|submit|exam", re.I)
 _BAIT = re.compile("|".join([
     r"거절하지\s*말고|거절\s*말고",
     r"(?:나|저)(?:는)?\s*(?:이\s*)?(?:튜터\s*)?(?:관리자|개발자|운영자|선생님)"
@@ -92,6 +100,11 @@ def for_search(query: str) -> str:
     if not INPUT_RULES:
         return query
     return write_numbers(join_spaced(query))
+
+
+def mentions_submission(messages: List[Dict[str, str]]) -> bool:
+    """True when the last learner turn says the work is to be handed in (or the gate is off)."""
+    return not SUBMIT_GATE or bool(_SUBMIT.search(last_user_turn(messages)))
 
 
 def is_low_signal(messages: List[Dict[str, str]]) -> bool:

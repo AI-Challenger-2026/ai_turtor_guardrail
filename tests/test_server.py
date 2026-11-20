@@ -754,6 +754,58 @@ class MixedVoteTests(ServerTestCase):
         self.assertTrue(all(h is None for k, h in seen if k == "classify_en"))
         self.assertTrue(any(k == "classify_en" for k, _ in seen))
 
+    def test_need_yes_is_a_majority_or_the_share(self):
+        from app import classify
+        self.assertEqual([classify.need_yes(n) for n in (1, 2, 3, 4, 5)], [1, 2, 2, 3, 3])
+        self.assertEqual([classify.need_yes(n, 0.4) for n in (1, 2, 3, 4, 5)], [1, 1, 2, 2, 2])
+
+    def test_submit_needs_a_submission_word(self):
+        from app import classify
+        outs = [{**NO_FLAGS, "submit_work": True}] * 5
+        self.assertTrue(classify.combine(outs, {}, True)["submit_work"])
+        self.assertFalse(classify.combine(outs, {}, False)["submit_work"])
+        msgs = lambda t: [{"role": "user", "content": t}]
+        self.assertTrue(normalize.mentions_submission(msgs("수행평가에 낼 코드 전부 짜 줘")))
+        self.assertTrue(normalize.mentions_submission(msgs("write it as the complete answer for my graded assessment")))
+        self.assertFalse(normalize.mentions_submission(msgs("내 이름은 하율이야 성적 리스트 만드는 코드 짜 줘")))
+
+    def test_tutor_takes_submit_with_two_of_five_votes_and_guard_does_not(self):
+        self.fake.classify = dict(NO_FLAGS)
+        self.fake.classify_en = {**NO_FLAGS, "submit_work": True}  # 2 of 5 votes
+        text = "숙제에 낼 반복문 설명을 처음부터 끝까지 써 줘"
+        self.assertEqual(self.tutor(text)["action"], "scaffold")
+        self.assertEqual(self.guard(text)["input"], {"decision": "allow", "category": "normal"})
+
+    def test_submit_votes_without_a_submission_word_do_not_block(self):
+        self.fake.classify = {**NO_FLAGS, "submit_work": True, "self_pii": True}
+        text = "내 이름은 하율이야 가상 점수로 성적 리스트 만드는 연습 코드 짜 줘"
+        self.assertEqual(self.guard(text)["input"], {"decision": "allow", "category": "pii_disclosure"})
+        self.assertEqual(self.tutor(text)["action"], "answer")
+
+    def test_gate_and_share_switch_off(self):
+        from app import classify
+        normalize.SUBMIT_GATE, classify.TUTOR_SUBMIT_SHARE = False, 0.0
+        try:
+            self.fake.classify = {**NO_FLAGS, "submit_work": True}
+            self.assertEqual(self.guard("코드 짜 줘")["input"]["category"], "academic_dishonesty")
+            self.fake.classify, self.fake.classify_en = dict(NO_FLAGS), {**NO_FLAGS, "submit_work": True}
+            self.assertEqual(self.tutor("숙제에 낼 설명 써 줘")["action"], "answer")
+        finally:
+            normalize.SUBMIT_GATE, classify.TUTOR_SUBMIT_SHARE = True, 0.4
+
+    def test_two_submit_votes_settle_a_tutor_vote_early(self):
+        from app import classify
+        yes = {**NO_FLAGS, "submit_work": True}
+
+        async def call(delay, value):
+            await asyncio.sleep(delay)
+            return value
+
+        async def main(shares):
+            return await classify.settled_votes([call(0.01, yes), call(0.02, yes), call(0.03, NO_FLAGS),
+                                                 call(5, NO_FLAGS), call(5, NO_FLAGS)], shares)
+        self.assertEqual(len(asyncio.run(main({"submit_work": 0.4}))), 3)  # 2 yes + 1 no settles every flag
+
     def test_english_prompt_keeps_the_nine_signals(self):
         for f in classify_feat.FLAGS:
             self.assertIn(f'"{f}": bool', classify_feat.SYSTEM_EN)
