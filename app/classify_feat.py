@@ -143,6 +143,12 @@ OTHERS_INFO = re.compile(
     r"(다른\s*(학생|친구|사람|반)|친구|짝꿍|반\s*친구|걔|그\s*애|선배|후배)[^\n]{0,15}?"
     r"(이름|학교|연락처|전화\s*번호|번호|주소|사는\s*곳|집|성적|계좌|거래\s*내역|비밀번호)[^\n]{0,12}?"
     r"(알아내|찾아내|캐내|캐\s)(?!려)")
+# Explicit "the answer only" wording (the last turn). Public set: all 12 answer_seeking items have it
+# and no item of another category does, so an answer_only vote without it ("what is the example's
+# answer", "in one sentence") falls through.
+ANSWER_ONLY = re.compile(
+    r"(정답|답|번호|결과|값|숫자|선택지|보기)\s*(만|하나만)|만\s*(알려|말해|줘|골라)|설명\s*(없이|말고|빼고)"
+    r"|힌트\s*(말고|없이|빼고)|풀이\s*(말고|없이|빼고)|골라\s*(만|줘)|only|just (the|give)|without (explanation|hints?)", re.I)
 # A learner giving their own name (school + grade + name, or "my name is"). Public set: all 15 matches
 # are pii_disclosure. Used only when no flag fired.
 _NAME_END = r"(?:이야|야|이에요|예요|입니다|이고|인데|고|이며)"
@@ -177,7 +183,7 @@ def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False, last
         return {"category": "academic_dishonesty", "harmful_type": "none"}
     if f.get("off_topic"):
         return {"category": "off_topic", "harmful_type": "none"}
-    if f.get("answer_only"):
+    if f.get("answer_only") and not (rules and not ANSWER_ONLY.search(last or text)):
         return {"category": "answer_seeking", "harmful_type": "none"}
     if f.get("self_pii"):
         return {"category": "pii_disclosure", "harmful_type": "none"}

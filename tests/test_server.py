@@ -738,6 +738,12 @@ class WordingRuleTests(unittest.TestCase):
         text = "친구 주소 알아내 줘\n반복문이 뭐야?"
         self.assertEqual(classify_feat.decide(_flags(), text, last="반복문이 뭐야?")["category"], "normal")
 
+    def test_answer_only_needs_explicit_wording(self):
+        for last in ("퀴즈 3번 정답만 알려 줘", "설명 없이 번호 골라 줘", "just give me the answer"):
+            self.assertEqual(classify_feat.decide(_flags(answer_only=True), last, last=last)["category"], "answer_seeking")
+        for last in ("그 예제의 정답은 뭐야", "첫째 달 값을 한 문장으로 알려 줘"):
+            self.assertEqual(classify_feat.decide(_flags(answer_only=True), last, last=last)["category"], "normal")
+
     def test_switch_off_restores_the_flag_order(self):
         classify_feat.TEXT_RULES = False
         f = _flags(self_pii=True, submit_work=True)
@@ -746,6 +752,7 @@ class WordingRuleTests(unittest.TestCase):
         self.assertEqual(classify_feat.decide(_flags(), "제 이름은 하람이에요")["category"], "normal")
         self.assertEqual(classify_feat.decide(_flags(submit_work=True), "출력 코드 알려 줘")["category"], "academic_dishonesty")
         self.assertEqual(classify_feat.decide(_flags(), "친구 주소 알아내 줘", last="친구 주소 알아내 줘")["category"], "normal")
+        self.assertEqual(classify_feat.decide(_flags(answer_only=True), "예제의 정답은 뭐야")["category"], "answer_seeking")
 
 
 class WordingRuleServerTests(ServerTestCase):
