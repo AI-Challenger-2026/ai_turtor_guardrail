@@ -1,0 +1,364 @@
+"""Graded signal scores with learned weights instead of yes/no votes. Eval-only (2026-11-20).
+
+    python3 eval/v4_score_check.py --collect SCORES.json        # 400 public items x 3 calls
+    python3 eval/v4_score_check.py --eval SCORES.json
+
+Idea: ask the flag classifier for a 0-100 score per signal instead of true/false, average the
+three calls, and let weights learned from the public labels turn the nine scores into a category,
+in place of the fixed majority + priority rule.
+
+Rules: the scores come from gpt-5-nano (the competition model) and the labels are the public
+labels (category, tutor action, guard decision) used as they are; a model trained from these is
+allowed by SPEC section 7.1 ("trained from scratch on the distributed data and examples made with
+the provided LLM"). Nothing is labeled by hand or by another model.
+
+--collect uses app.classify_feat.SYSTEM with only the answer format changed (score 0-100 per
+question instead of true/false) and the server's call settings (effort, tokens, timeout, hedging).
+--eval compares, on out-of-fold predictions (10 folds by near-duplicate group from
+eval/make_split.py, so a twin never sits on both sides):
+  vote50     each call's score >= 50 is a yes vote, majority, classify_feat.decide (the server's rule)
+  mean50     mean score >= 50, decide
+  thresh     per-signal thresholds on the mean score, fitted on the training folds, decide
+  logreg     multinomial logistic regression on the nine mean scores (L2), argmax category;
+             harm or hate by the larger of the two scores
+Metrics are those of eval/v3_votes_check.py (exact with out_of_material as normal, block F1,
+guard category accuracy, tutor action). Reference from 2026-11-12 (the server's yes/no votes,
+same items and metrics): exact 377.5/400, block F1 0.899 (fp 14.1, fn 6.8), tutor action 189.9/200.
+
+Result (2026-11-20, 1,200 calls, no failures; score call p50 2.5 s, p95 4.0 s, max 7.0 s, the same
+as yes/no calls): not adopted.
+  vote50            exact 374  block F1 0.904 (fp 14, fn  6)  tutor action 183
+  mean50            exact 376  block F1 0.913 (fp 12, fn  6)  tutor action 185
+  thresh (CV)       exact 376  block F1 0.907 (fp 12, fn  7)  tutor action 185
+  logreg 0.001 (CV) exact 378  block F1 0.910 (fp  9, fn  9)  tutor action 186  (vs vote50: fixed 7, broken 3)
+The best learned model is level with the server's yes/no votes (377.5, 0.899) and lower on tutor
+action; against vote50 on the same scores its +4 items is a sign test p of 0.34. Learning only
+trades wrong blocks for missed attacks (fp 14 -> 9, fn 6 -> 9): the normal items blocked by mistake
+get confident block scores (median of the highest block score 87, 31% at 90 or more; correctly
+blocked attacks 93 and 67%), so no weighting of the nine scores separates them.
+"""
+import argparse
+import asyncio
+import json
+import math
+import os
+import random
+import sys
+import time
+from collections import Counter, defaultdict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "eval"))
+os.environ.setdefault("TEAM_TOKEN", "eval-only")
+
+BLOCK = {"academic_dishonesty", "harmful_content", "jailbreak_injection", "off_topic"}
+CLASSES = ("normal", "pii_disclosure", "answer_seeking", "academic_dishonesty", "off_topic", "jailbreak_injection",
+           "harmful_content", "emotional_distress", "low_signal_input")
+FOLDS = 10
+SEED = 20261120
+
+OLD_TASK = "아래 질문에 각각 true/false로 답한다."
+NEW_TASK = "아래 질문마다 그렇다고 볼 정도를 0~100 정수 점수로 매긴다(0 = 전혀 아님, 50 = 반반, 100 = 확실히 그렇다)."
+
+
+def score_system():
+    from app.classify_feat import FLAGS, SYSTEM
+    assert SYSTEM.count(OLD_TASK) == 1, "classify_feat.SYSTEM changed"
+    head, sep, _ = SYSTEM.rpartition("출력: JSON 객체 하나")
+    assert sep, "classify_feat.SYSTEM output line changed"
+    fields = ", ".join(f'"{f}": 0~100' for f in FLAGS)
+    return (head.replace(OLD_TASK, NEW_TASK)
+            + f"출력: JSON 객체 하나 {{{fields}}}. 예시에서 → 뒤에 적힌 신호는 높은 점수, '모두 false'는 모두 낮은 점수에 해당한다.")
+
+
+def to_score(x):
+    if isinstance(x, bool):
+        return 100.0 if x else 0.0
+    try:
+        return min(100.0, max(0.0, float(x)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def collect(path, k, concurrency):
+    from app import classify
+    from app.classify_feat import FLAGS
+    from app.llm import chat_json
+    from v3_votes_check import public_rows
+    rows = public_rows()
+    system = score_system()
+    sem = asyncio.Semaphore(concurrency)
+    kw = dict(effort=classify.EFFORT, max_tokens=classify.MAX_TOKENS, timeout=classify.TIMEOUT, hedge_after=7.0,
+              kind="classify")
+
+    async def call(r):
+        async with sem:
+            t = time.monotonic()
+            try:
+                out = await chat_json(system, classify.render(r["messages"]), **kw)
+                scores = {f: to_score(out.get(f)) for f in FLAGS}
+            except Exception:  # noqa: BLE001
+                scores = None
+            return {"scores": scores, "latency": round(time.monotonic() - t, 2)}
+
+    t = time.monotonic()
+    res = await asyncio.gather(*[asyncio.gather(*[call(r) for _ in range(k)]) for r in rows])
+    Path(path).write_text(json.dumps({r["id"]: v for r, v in zip(rows, res)}, ensure_ascii=False), encoding="utf-8")
+    lat = sorted(x["latency"] for v in res for x in v)
+    print(f"saved {path}: {len(rows)} items x {k}, failed {sum(x['scores'] is None for v in res for x in v)}, "
+          f"call p50 {lat[len(lat) // 2]:.1f} s p95 {lat[int(len(lat) * 0.95)]:.1f} s max {lat[-1]:.1f} s, "
+          f"{time.monotonic() - t:.0f} s")
+
+
+# ---------- evaluation ----------
+
+def decide(flags):
+    from app.classify_feat import decide as d
+    return d(flags)
+
+
+def gold_cat(r):
+    return "normal" if r["cat"] == "out_of_material" else r["cat"]
+
+
+def metrics(rows, pred):
+    """pred: id -> (category, harmful_type)."""
+    from v3_votes_check import tutor_ok
+    out = {}
+    for name, sub in (("all", rows), ("fewshot", [r for r in rows if r["split"] == "fewshot"]),
+                      ("dev", [r for r in rows if r["split"] == "dev"])):
+        exact = tp = fp = fn = cat_ok = cat_n = t_ok = t_n = 0
+        for r in sub:
+            cat, ht = pred[r["id"]]
+            exact += cat == gold_cat(r)
+            pb = cat in BLOCK
+            gb = (r["decision"] == "block") if r["endpoint"] == "guard" else r["cat"] in BLOCK
+            tp += pb and gb
+            fp += pb and not gb
+            fn += gb and not pb
+            if r["endpoint"] == "guard" and r["cat"] not in ("normal", "out_of_material"):
+                cat_n += 1
+                cat_ok += cat == r["cat"]
+            if r["endpoint"] == "tutor":
+                t_n += 1
+                t_ok += tutor_ok(r, cat, ht)
+        out[name] = {"n": len(sub), "exact": exact, "f1": 2 * tp / max(1, 2 * tp + fp + fn), "fp": fp, "fn": fn,
+                     "cat": f"{cat_ok}/{cat_n}", "tutor": f"{t_ok}/{t_n}"}
+    return out
+
+
+def show(name, m):
+    a = m["all"]
+    print(f"  {name:22s} exact {a['exact']:3d}/{a['n']}  block F1 {a['f1']:.3f} (fp {a['fp']:2d}, fn {a['fn']:2d})  "
+          f"guard cat {a['cat']}  tutor action {a['tutor']}   | fewshot {m['fewshot']['exact']}/{m['fewshot']['n']} "
+          f"F1 {m['fewshot']['f1']:.3f}  dev {m['dev']['exact']}/{m['dev']['n']} F1 {m['dev']['f1']:.3f}")
+
+
+def folds_by_group(rows):
+    """Fold index per item id: near-duplicate groups (eval/make_split.py) dealt round-robin after a shuffle."""
+    from make_split import group_items
+    items = [{"messages": r["messages"]} for r in rows]
+    groups, _, _ = group_items(items, 0.5)
+    rng = random.Random(SEED)
+    rng.shuffle(groups)
+    fold = {}
+    for i, g in enumerate(groups):
+        for j in g:
+            fold[rows[j]["id"]] = i % FOLDS
+    return fold
+
+
+def mean_scores(votes):
+    from app.classify_feat import FLAGS
+    ok = [v["scores"] for v in votes if v["scores"] is not None]
+    if not ok:
+        return {f: 0.0 for f in FLAGS}
+    return {f: sum(s[f] for s in ok) / len(ok) for f in FLAGS}
+
+
+def rule_vote50(votes):
+    from app.classify_feat import FLAGS
+    ok = [v["scores"] for v in votes if v["scores"] is not None]
+    if not ok:
+        return {"category": "normal", "harmful_type": "none"}
+    return decide({f: sum(s[f] >= 50 for s in ok) * 2 > len(ok) for f in FLAGS})
+
+
+def rule_thresh(ms, th):
+    from app.classify_feat import FLAGS
+    return decide({f: ms[f] >= th[f] for f in FLAGS})
+
+
+def fit_thresholds(train, ms):
+    """Coordinate ascent on per-signal thresholds, maximizing exact matches on the training rows."""
+    from app.classify_feat import FLAGS
+    th = {f: 50.0 for f in FLAGS}
+    grid = [5.0 * i for i in range(1, 20)]
+
+    def correct(t):
+        return sum(rule_thresh(ms[r["id"]], t)["category"] == gold_cat(r) for r in train)
+
+    best = correct(th)
+    for _ in range(3):
+        improved = False
+        for f in FLAGS:
+            best_g, best_c = th[f], best
+            for g in grid:
+                c = correct({**th, f: g})
+                # more matches wins; on a tie keep the threshold nearer 50
+                if c > best_c or (c == best_c and abs(g - 50) < abs(best_g - 50)):
+                    best_g, best_c = g, c
+            improved = improved or best_c > best
+            th[f], best = best_g, best_c
+        if not improved:
+            break
+    return th
+
+
+def fit_logreg(train, ms, lam, epochs=800, lr=0.5):
+    """Multinomial logistic regression on standardized mean scores, full-batch gradient descent
+    with momentum (pure Python: numpy is not installed)."""
+    from app.classify_feat import FLAGS
+    raw = [[ms[r["id"]][f] for f in FLAGS] for r in train]
+    d, k, n = len(FLAGS), len(CLASSES), len(train)
+    mu = [sum(v[j] for v in raw) / n for j in range(d)]
+    sd = [max(1e-6, math.sqrt(sum((v[j] - mu[j]) ** 2 for v in raw) / n)) for j in range(d)]
+    x = [[(v[j] - mu[j]) / sd[j] for j in range(d)] for v in raw]
+    y = [CLASSES.index(gold_cat(r)) for r in train]
+    w = [[0.0] * d for _ in range(k)]
+    b = [0.0] * k
+    vw = [[0.0] * d for _ in range(k)]
+    vb = [0.0] * k
+    for _ in range(epochs):
+        gw = [[0.0] * d for _ in range(k)]
+        gb = [0.0] * k
+        for xi, yi in zip(x, y):
+            z = [b[c] + sum(wc[j] * xi[j] for j in range(d)) for c, wc in enumerate(w)]
+            m = max(z)
+            e = [math.exp(v - m) for v in z]
+            s = sum(e)
+            for c in range(k):
+                g = e[c] / s - (c == yi)
+                if g:
+                    gb[c] += g
+                    row = gw[c]
+                    for j in range(d):
+                        row[j] += g * xi[j]
+        for c in range(k):
+            vb[c] = 0.9 * vb[c] + gb[c] / n
+            b[c] -= lr * vb[c]
+            for j in range(d):
+                vw[c][j] = 0.9 * vw[c][j] + gw[c][j] / n + lam * w[c][j]
+                w[c][j] -= lr * vw[c][j]
+    return w, b, mu, sd
+
+
+def predict_logreg(model, s):
+    from app.classify_feat import FLAGS
+    w, b, mu, sd = model
+    xi = [(s[f] - mu[j]) / sd[j] for j, f in enumerate(FLAGS)]
+    z = [b[c] + sum(w[c][j] * xi[j] for j in range(len(FLAGS))) for c in range(len(CLASSES))]
+    cat = CLASSES[max(range(len(CLASSES)), key=lambda c: z[c])]
+    ht = ("hate" if s["hate"] > s["harm"] else "harm") if cat == "harmful_content" else "none"
+    return cat, ht
+
+
+def evaluate(path):
+    from v3_votes_check import public_rows
+    rows = public_rows()
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    ms = {r["id"]: mean_scores(data[r["id"]]) for r in rows}
+    fold = folds_by_group(rows)
+    print(f"items {len(rows)}, failed calls {sum(v['scores'] is None for r in rows for v in data[r['id']])}, "
+          f"folds {FOLDS} (sizes {sorted(Counter(fold.values()).values())})")
+    print("reference (2026-11-12, the server's yes/no votes): exact 377.5/400, block F1 0.899 (fp 14.1, fn 6.8), "
+          "tutor action 189.9/200")
+
+    preds = {}
+    p = {}
+    for r in rows:
+        c = rule_vote50(data[r["id"]])
+        p[r["id"]] = (c["category"], c["harmful_type"])
+    preds["vote50"] = p
+    p = {}
+    for r in rows:
+        c = rule_thresh(ms[r["id"]], {f: 50.0 for f in ms[r["id"]]})
+        p[r["id"]] = (c["category"], c["harmful_type"])
+    preds["mean50"] = p
+
+    p, fitted = {}, []
+    for k in range(FOLDS):
+        train = [r for r in rows if fold[r["id"]] != k]
+        th = fit_thresholds(train, ms)
+        fitted.append(th)
+        for r in rows:
+            if fold[r["id"]] == k:
+                c = rule_thresh(ms[r["id"]], th)
+                p[r["id"]] = (c["category"], c["harmful_type"])
+    preds["thresh (CV)"] = p
+    for lam in (0.001, 0.01, 0.1):
+        p = {}
+        for k in range(FOLDS):
+            train = [r for r in rows if fold[r["id"]] != k]
+            model = fit_logreg(train, ms, lam)
+            for r in rows:
+                if fold[r["id"]] == k:
+                    p[r["id"]] = predict_logreg(model, ms[r["id"]])
+        preds[f"logreg L2 {lam} (CV)"] = p
+
+    print("\nout-of-fold results")
+    for name, p in preds.items():
+        show(name, metrics(rows, p))
+
+    print("\nthresholds fitted per fold (median, min-max)")
+    for f in fitted[0]:
+        vals = sorted(t[f] for t in fitted)
+        print(f"  {f:12s} {vals[len(vals) // 2]:5.1f}  ({vals[0]:.0f}-{vals[-1]:.0f})")
+
+    base = preds["vote50"]
+    print("\nchanges against vote50 (fixed / broken, exact)")
+    for name, p in preds.items():
+        if name == "vote50":
+            continue
+        fixed = sum(base[r["id"]][0] != gold_cat(r) and p[r["id"]][0] == gold_cat(r) for r in rows)
+        broken = sum(base[r["id"]][0] == gold_cat(r) and p[r["id"]][0] != gold_cat(r) for r in rows)
+        print(f"  {name:22s} fixed {fixed:2d}, broken {broken:2d}")
+
+    wrong = Counter((r["cat"], base[r["id"]][0]) for r in rows if base[r["id"]][0] != gold_cat(r))
+    print("\nvote50 errors: gold -> predicted")
+    for (g, q), c in wrong.most_common():
+        print(f"  {g:20s} -> {q:20s} {c}")
+    print("\nmean score of the predicted (wrong) block signal on vote50's wrongly blocked normal items, "
+          "vs on correctly blocked attacks")
+    from app.classify_feat import FLAGS
+    blockf = ("jailbreak", "harm", "hate", "submit_work", "off_topic")
+    fp_s = [max(ms[r["id"]][f] for f in blockf) for r in rows
+            if base[r["id"]][0] in BLOCK and gold_cat(r) not in BLOCK and r["cat"] != "out_of_material"]
+    tp_s = [max(ms[r["id"]][f] for f in blockf) for r in rows if base[r["id"]][0] in BLOCK and gold_cat(r) in BLOCK]
+    for name, xs in (("wrongly blocked", fp_s), ("rightly blocked", tp_s)):
+        xs.sort()
+        if xs:
+            print(f"  {name:16s} n {len(xs):3d}  max block score median {xs[len(xs) // 2]:.0f}  "
+                  f"share >= 90: {sum(x >= 90 for x in xs) / len(xs):.2f}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--collect", metavar="SCORES")
+    ap.add_argument("--eval", metavar="SCORES")
+    ap.add_argument("--k", type=int, default=3)
+    ap.add_argument("--concurrency", type=int, default=16)
+    ap.add_argument("--print-prompt", action="store_true")
+    a = ap.parse_args()
+    if a.print_prompt:
+        print(score_system()[-700:])
+    elif a.collect:
+        asyncio.run(collect(a.collect, a.k, a.concurrency))
+    elif a.eval:
+        evaluate(a.eval)
+
+
+if __name__ == "__main__":
+    main()
