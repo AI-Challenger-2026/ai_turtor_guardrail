@@ -116,7 +116,7 @@ async def collect(path, concurrency):
     print(f"saved {path}, {len(res)} calls, {time.monotonic() - t:.0f} s")
 
 
-async def collect_arm(path, arm, rules_file, concurrency):
+async def collect_arm(path, arm, rules_file, concurrency, ids_file=None):
     """Add one arm to an existing votes file: final-v3 prompt + the given rules text, or, for a file
     named *.system.txt, that whole prompt."""
     from app import classify, classify_feat, normalize
@@ -142,6 +142,9 @@ async def collect_arm(path, arm, rules_file, concurrency):
                 return {"flags": None}
 
     rows = [r for r in public_rows() if not normalize.is_low_signal(r["messages"])]
+    if ids_file:
+        keep = set(json.loads(Path(ids_file).read_text(encoding="utf-8")))
+        rows = [r for r in rows if r["id"] in keep]
     texts = [classify.render(normalize.for_classifier(r["messages"])) for r in rows]
     res = await asyncio.gather(*[asyncio.gather(*[vote(t) for _ in range(3)]) for t in texts])
     for r, v in zip(rows, res):
@@ -214,13 +217,14 @@ def main():
     ap.add_argument("--concurrency", type=int, default=16)
     ap.add_argument("--check", action="store_true", help="overlap check of the added text (no calls)")
     ap.add_argument("--add-arm", nargs=3, metavar=("VOTES", "ARM", "RULES_FILE"))
+    ap.add_argument("--ids", help="JSON list of item ids: collect --add-arm for these items only")
     a = ap.parse_args()
     if a.check:
         print("14-char overlaps with public items:", overlaps())
     elif a.collect:
         asyncio.run(collect(a.collect, a.concurrency))
     elif a.add_arm:
-        asyncio.run(collect_arm(*a.add_arm, a.concurrency))
+        asyncio.run(collect_arm(*a.add_arm, a.concurrency, a.ids))
     elif a.eval:
         evaluate(a.eval)
 
