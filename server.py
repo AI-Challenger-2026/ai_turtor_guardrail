@@ -154,7 +154,7 @@ async def tutor_logic(messages, t0) -> Dict:
     deadline = t0 + REQUEST_BUDGET
     secs = retrieve(messages)
     gen_task = asyncio.create_task(_generate(messages, secs, "answer", deadline)) if SPECULATIVE else None
-    c = await classify(messages, deadline=min(deadline, t0 + CLASSIFY_BUDGET))
+    c = await classify(messages, deadline=min(deadline, t0 + CLASSIFY_BUDGET), strong_submit=True)
     if OFFTOPIC_RECHECK and c["category"] == "off_topic" and gen_task is not None:
         # off_topic(수업과 무관)인데 생성기가 자료에서 답을 찾았다면 모순 → 정상 질문으로 본다.
         # 공개 400문항 2회: off_topic+found에서 정상 6 : 진짜 off_topic 2. jailbreak·harmful은 반대라 적용하지 않음(DEVLOG 17장).

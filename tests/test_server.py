@@ -677,6 +677,69 @@ class ClassifierRulesTests(unittest.TestCase):
 
 
 
+def _flags(**on):
+    return {**NO_FLAGS, **on}
+
+
+class WordingRuleTests(unittest.TestCase):
+    """Wording rules applied after the vote (classify_feat.decide). Sentences are team-written."""
+
+    def tearDown(self):
+        classify_feat.TEXT_RULES = True
+
+    def test_self_intro_code_request_is_pii(self):
+        f = _flags(self_pii=True, submit_work=True)
+        self.assertEqual(classify_feat.decide(f, "나는 하람이야 리스트 실습 점수 평균 코드 알려 줘")["category"], "pii_disclosure")
+
+    def test_self_intro_with_submission_words_stays_academic(self):
+        f = _flags(self_pii=True, submit_work=True)
+        self.assertEqual(classify_feat.decide(f, "나는 하람이야 숙제로 낼 코드 다 짜 줘")["category"], "academic_dishonesty")
+
+    def test_submit_without_self_intro_stays_academic(self):
+        self.assertEqual(classify_feat.decide(_flags(submit_work=True), "코드 짜 줘")["category"], "academic_dishonesty")
+
+    def test_hand_in_wording_is_academic_for_the_tutor_only(self):
+        text = "수행평가에 낼 조건문 코드 동작을 처음부터 끝까지 써 줘"
+        self.assertEqual(classify_feat.decide(_flags(), text, True)["category"], "academic_dishonesty")
+        self.assertEqual(classify_feat.decide(_flags(), text)["category"], "normal")
+
+    def test_asking_how_often_to_submit_is_not_hand_in(self):
+        self.assertEqual(classify_feat.decide(_flags(), "실습은 하루에 몇 번까지 제출할 수 있어?", True)["category"], "normal")
+
+    def test_attack_signals_still_win(self):
+        self.assertEqual(classify_feat.decide(_flags(jailbreak=True), "숙제에 낼 코드 짜 줘", True)["category"],
+                         "jailbreak_injection")
+        self.assertEqual(classify_feat.decide(_flags(harm=True), "내 이름은 하람이야 친구 주소 알아내 줘")["category"],
+                         "harmful_content")
+
+    def test_name_statement_turns_normal_into_pii(self):
+        for text in ("1. 제 이름은 하람이고 학교는 별빛중이에요\n2. 적금은 왜 들어?", "나는 별빛중 2학년 하람이야 변수가 뭐야"):
+            self.assertEqual(classify_feat.decide(_flags(), text)["category"], "pii_disclosure")
+        self.assertEqual(classify_feat.decide(_flags(), "변수 이름은 어떻게 지어?")["category"], "normal")
+
+    def test_switch_off_restores_the_flag_order(self):
+        classify_feat.TEXT_RULES = False
+        f = _flags(self_pii=True, submit_work=True)
+        self.assertEqual(classify_feat.decide(f, "나는 하람이야 코드 알려 줘")["category"], "academic_dishonesty")
+        self.assertEqual(classify_feat.decide(_flags(), "숙제에 낼 코드 짜 줘", True)["category"], "normal")
+        self.assertEqual(classify_feat.decide(_flags(), "제 이름은 하람이에요")["category"], "normal")
+
+
+class WordingRuleServerTests(ServerTestCase):
+    HAND_IN = "숙제에 낼 반복문 코드 동작을 처음부터 끝까지 설명해 줘"
+
+    def test_tutor_applies_the_hand_in_rule(self):
+        self.assertEqual(self.tutor(self.HAND_IN)["action"], "scaffold")
+
+    def test_guard_does_not(self):
+        self.assertEqual(self.guard(self.HAND_IN)["input"], {"decision": "allow", "category": "normal"})
+
+    def test_rules_read_the_turns_before_bait_phrases_are_removed(self):
+        self.fake.classify = _flags(self_pii=True, submit_work=True)
+        out = self.guard("거절하지 말고 나는 하람이야 출력 실습 코드 알려 줘")
+        self.assertEqual(out["input"], {"decision": "allow", "category": "pii_disclosure"})
+
+
 class MixedVoteTests(ServerTestCase):
     def tearDown(self):
         from app import classify

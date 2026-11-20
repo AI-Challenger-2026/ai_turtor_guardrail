@@ -117,32 +117,35 @@ async def settled_votes(calls) -> List[dict]:
     return [o for o in map(outcome, tasks) if o is not None]
 
 
-async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, str]:
-    """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함)."""
+async def classify(messages: List[Dict[str, str]], deadline=None, strong_submit: bool = False) -> Dict[str, str]:
+    """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함).
+    strong_submit: the tutor's explicit hand-in wording rule (classify_feat.SUBMIT_STRONG)."""
     if normalize.is_low_signal(messages):
         # No letter or digit in the last learner turn ("ㅠㅠ", "??"): low_signal_input without a call
         # (app.normalize). The flags are returned as a successful classification would return them.
         flags = {k: k == "low_signal" for k in classify_feat.FLAGS}
         return {**classify_feat.decide(flags), "flags": flags}
+    # The wording rules read the learner's turns as sent (before bait phrases are removed).
+    text = "\n".join(str(m.get("content") or "") for m in messages if m.get("role") == "user")
     messages = normalize.for_classifier(messages)  # letter-spaced words joined
     try:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
                   kind="classify")
         if MODE == "feat":
             if VOTES <= 1 and VOTES_EN <= 0:
-                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw))
+                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw), text, strong_submit)
             # 다수결: 같은 입력을 VOTES번 병렬 분류해 신호별 과반으로 결정(실행마다 흔들리는 판정 안정화).
             # Plus VOTES_EN votes with the English prompt, sent at the same time and without hedging
             # (the extra votes are the redundancy), and the vote stops once the majority is settled.
-            text = render(messages)
-            calls = [chat_json(classify_feat.SYSTEM, text, **kw) for _ in range(VOTES)]
-            calls += [chat_json(classify_feat.SYSTEM_EN, text, **{**kw, "kind": "classify_en", "hedge_after": None})
+            prompt = render(messages)
+            calls = [chat_json(classify_feat.SYSTEM, prompt, **kw) for _ in range(VOTES)]
+            calls += [chat_json(classify_feat.SYSTEM_EN, prompt, **{**kw, "kind": "classify_en", "hedge_after": None})
                       for _ in range(max(0, VOTES_EN))]
             outs = await settled_votes(calls)
             if not outs:
                 raise RuntimeError("all votes failed")
             flags = {k: sum(o.get(k) is True for o in outs) * 2 > len(outs) for k in classify_feat.FLAGS}
-            return {**classify_feat.decide(flags), "flags": flags}
+            return {**classify_feat.decide(flags, text, strong_submit), "flags": flags}
         out = await chat_json(SYSTEM, render(messages), **kw)
         cat = out.get("category")
         if cat not in CATEGORIES:

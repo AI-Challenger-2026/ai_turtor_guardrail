@@ -4,6 +4,8 @@
 예시는 팀이 새로 쓴 문장이다(공개 세트 문항 복사 아님).
 """
 import os
+import os
+import re
 from typing import Dict, List
 
 SYSTEM_BASE = """너는 중학생용 온라인 학습 플랫폼(파이썬 기초, AI 프롬프트 활용, 금융 리터러시)의 입력 검사기다.
@@ -123,8 +125,32 @@ Output: one JSON object {"self_pii": bool, "distress": bool, "jailbreak": bool, 
 FLAGS = ("self_pii", "distress", "jailbreak", "harm", "hate", "submit_work", "answer_only", "off_topic", "low_signal")
 
 
-def decide(f: Dict[str, bool]) -> Dict[str, str]:
-    """신호 → 범주. 우선순위는 공개 세트에서 관찰한 라벨 관계를 따른다."""
+# Wording rules on the learner's own turns (origin/wonwoo-v4, 2026-11-13), applied after the vote.
+# Grammatical forms only: no lists of names, schools or public item text. TEXT_RULES=0 turns them off.
+TEXT_RULES = os.environ.get("CLASSIFY_TEXT_RULES", "1") == "1"
+# Submission wording; without it, a self-introduction plus a code request is pii, not academic dishonesty.
+# Public set: all 15 academic_dishonesty items contain it.
+SUBMIT_WORDS = re.compile(r"수행\s*평가|숙제|과제|제출|답안|시험|보고서|assignment|homework|submi|graded|exam", re.I)
+# Explicit "hand this in" wording, tutor only. Public tutor set: all 8 items with it are
+# academic_dishonesty ("제출할 수", asking how often one may submit, is excluded).
+SUBMIT_STRONG = re.compile(
+    r"(수행\s*평가|숙제|과제)(에|로|용)?\s*(낼|넣을|제출할)\s|제출할\s*(완성\s*)?(코드|답|글|보고서|설명|report|code)"
+    r"|제출용|제출\s*답안|답안으로|답안\s*전체|완성\s*답안|보고서\s*전체|완성\s*report|for submission|graded", re.I)
+# A learner giving their own name (school + grade + name, or "my name is"). Public set: all 15 matches
+# are pii_disclosure. Used only when no flag fired.
+_NAME_END = r"(?:이야|야|이에요|예요|입니다|이고|인데|고|이며)"
+_SCHOOL_GRADE_NAME = (r"(?:초등학교|중학교|고등학교|[가-힣]{1,8}(?:초|중|고))\s*\d\s*학년(?:\s*\d+\s*반)?\s*[가-힣]{1,5}"
+                      + _NAME_END)
+SELF_INTRO = re.compile(r"(?:^|\s)(?:나는|난|나|저는|전|저)\s+[^\n]{0,20}?" + _SCHOOL_GRADE_NAME
+                        + r"|(?:내|제)\s*이름은\s*[가-힣]{1,5}" + _NAME_END)
+
+
+def decide(f: Dict[str, bool], text: str = "", strong_submit: bool = False) -> Dict[str, str]:
+    """신호 → 범주. 우선순위는 공개 세트에서 관찰한 라벨 관계를 따른다.
+    text: the learner's own turns as sent (wording rules); strong_submit: tutor only."""
+    rules = TEXT_RULES and bool(text)
+    if rules and strong_submit and SUBMIT_STRONG.search(text):
+        f = {**f, "submit_work": True}
     if f.get("distress"):
         return {"category": "emotional_distress", "harmful_type": "none"}
     if f.get("low_signal"):
@@ -135,7 +161,7 @@ def decide(f: Dict[str, bool]) -> Dict[str, str]:
         return {"category": "harmful_content", "harmful_type": "harm"}
     if f.get("hate"):
         return {"category": "harmful_content", "harmful_type": "hate"}
-    if f.get("submit_work"):
+    if f.get("submit_work") and not (rules and f.get("self_pii") and not SUBMIT_WORDS.search(text)):
         return {"category": "academic_dishonesty", "harmful_type": "none"}
     if f.get("off_topic"):
         return {"category": "off_topic", "harmful_type": "none"}
@@ -143,9 +169,11 @@ def decide(f: Dict[str, bool]) -> Dict[str, str]:
         return {"category": "answer_seeking", "harmful_type": "none"}
     if f.get("self_pii"):
         return {"category": "pii_disclosure", "harmful_type": "none"}
+    if rules and SELF_INTRO.search(text):
+        return {"category": "pii_disclosure", "harmful_type": "none"}
     return {"category": "normal", "harmful_type": "none"}
 
 
-def parse(out: dict) -> Dict[str, str]:
+def parse(out: dict, text: str = "", strong_submit: bool = False) -> Dict[str, str]:
     flags = {k: out.get(k) is True for k in FLAGS}
-    return {**decide(flags), "flags": flags}
+    return {**decide(flags, text, strong_submit), "flags": flags}
