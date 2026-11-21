@@ -117,7 +117,7 @@ async def settled_votes(calls) -> List[dict]:
     return [o for o in map(outcome, tasks) if o is not None]
 
 
-async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, str]:
+async def classify(messages: List[Dict[str, str]], deadline=None, *, for_guard: bool = False) -> Dict[str, str]:
     """{"category", "harmful_type"}를 돌려준다. 실패하면 normal로 둔다(정상 입력 차단을 피함)."""
     if normalize.is_low_signal(messages):
         # No letter or digit in the last learner turn ("ㅠㅠ", "??"): low_signal_input without a call
@@ -129,14 +129,16 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
                   kind="classify")
         if MODE == "feat":
+            system = classify_feat.GUARD_SYSTEM if for_guard else classify_feat.SYSTEM
+            text = render(messages)
             if VOTES <= 1 and VOTES_EN <= 0:
-                return classify_feat.parse(await chat_json(classify_feat.SYSTEM, render(messages), **kw))
+                return classify_feat.parse(await chat_json(system, text, **kw))
             # 다수결: 같은 입력을 VOTES번 병렬 분류해 신호별 과반으로 결정(실행마다 흔들리는 판정 안정화).
             # Plus VOTES_EN votes with the English prompt, sent at the same time and without hedging
             # (the extra votes are the redundancy), and the vote stops once the majority is settled.
-            text = render(messages)
-            calls = [chat_json(classify_feat.SYSTEM, text, **kw) for _ in range(VOTES)]
-            calls += [chat_json(classify_feat.SYSTEM_EN, text, **{**kw, "kind": "classify_en", "hedge_after": None})
+            system_en = classify_feat.GUARD_SYSTEM_EN if for_guard else classify_feat.SYSTEM_EN
+            calls = [chat_json(system, text, **kw) for _ in range(VOTES)]
+            calls += [chat_json(system_en, text, **{**kw, "kind": "classify_en", "hedge_after": None})
                       for _ in range(max(0, VOTES_EN))]
             outs = await settled_votes(calls)
             if not outs:

@@ -47,9 +47,9 @@ class Fake:
             if isinstance(value, Exception):
                 raise value
             return value
-        if system == classify_feat.SYSTEM:
+        if system in (classify_feat.SYSTEM, classify_feat.GUARD_SYSTEM):
             kind, value = "classify", self.classify
-        elif system == classify_feat.SYSTEM_EN:
+        elif system in (classify_feat.SYSTEM_EN, classify_feat.GUARD_SYSTEM_EN):
             kind, value = "classify_en", (self.classify if self.classify_en is None else self.classify_en)
         elif system == verify.SYSTEM:
             kind, value = "ground", self.ground
@@ -698,6 +698,26 @@ class MixedVoteTests(ServerTestCase):
         self.fake.classify = dict(NO_FLAGS)
         self.fake.classify_en = {**NO_FLAGS, "jailbreak": True}
         self.assertEqual(self.tutor("반복문이 뭐야")["action"], "answer")
+
+    def test_tutor_and_guard_use_separate_submit_work_prompts(self):
+        tutor_prompts = {classify_feat.SYSTEM, classify_feat.SYSTEM_EN}
+        guard_prompts = {classify_feat.GUARD_SYSTEM, classify_feat.GUARD_SYSTEM_EN}
+        seen = set()
+
+        def track_prompt(user, system):
+            seen.add(system)
+            return dict(NO_FLAGS)
+
+        self.fake.classify = self.fake.classify_en = track_prompt
+        self.assertTrue(tutor_prompts.isdisjoint(guard_prompts))
+        self.assertEqual(self.tutor("수업 내용을 배울 때 질문을 어떻게 정리해요?")["action"], "answer")
+        self.assertEqual(seen, tutor_prompts)
+        for candidate in (None, "", "수업 자료에서 핵심 개념과 예제를 찾아 보세요."):
+            with self.subTest(candidate=candidate):
+                seen.clear()
+                out = self.guard("수업 내용을 배울 때 질문을 어떻게 정리해요?", candidate=candidate)
+                self.assertEqual(out["input"]["decision"], "allow")
+                self.assertEqual(seen, guard_prompts)
 
     def test_switch_off_keeps_korean_votes_only(self):
         from app import classify

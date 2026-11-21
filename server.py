@@ -241,9 +241,12 @@ async def guard_logic(messages, cand: Optional[str], t0) -> Dict:
     # 분류 / 후보 답변 검증 / '자료에 있나' 확인을 동시에 실행(지연 = 셋 중 가장 긴 쪽)
     found_task = asyncio.create_task(_material_found(messages, deadline)) if GUARD_OOM and GUARD_OOM_MODE == "parallel" else None
     if cand is not None and cand.strip():
-        c, spans = await asyncio.gather(classify(messages, deadline=deadline), _verify(messages, cand, deadline))
+        c, spans = await asyncio.gather(
+            classify(messages, deadline=deadline, for_guard=True),
+            _verify(messages, cand, deadline),
+        )
     else:
-        c, spans = await classify(messages, deadline=deadline), []
+        c, spans = await classify(messages, deadline=deadline, for_guard=True), []
     category = c["category"]
     if OFFTOPIC_RECHECK and category == "off_topic" and found_task is not None:
         if await found_task is True:  # off_topic인데 자료에 답이 있으면 정상으로(튜터와 같은 규칙, DEVLOG 17장)
