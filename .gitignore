@@ -1,18 +1,5 @@
-# Local secrets
 .env
-.env.*
-!.env.example
-/submission.json
-
-# Python generated files
+.env
 __pycache__/
-*.py[cod]
-.venv/
-
-# Runtime artifacts
 logs/
-/output/cache/
-
-# Local Codex instructions
-/AGENTS.md
-/docs/CODEX_GUIDE.md
+eval/out/

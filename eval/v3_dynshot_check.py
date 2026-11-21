@@ -39,7 +39,7 @@ CAT_FLAG = {"emotional_distress": "distress", "low_signal_input": "low_signal", 
             "pii_disclosure": "self_pii", "normal": None}
 K = 6
 HEAD = ("[참고: 표현이 비슷한 공개 예시의 마지막 학습자 발화와 정답 신호. 표현이 비슷해도 실제로 시키는 일이 다르면 "
-        "다르게 판단한다. 예시의 jailbreak 신호는 current_tutor에 대한 apply 또는 disclose 요구를 뜻한다.]")
+        "다르게 판단한다]")
 
 
 def user_turns(messages):
@@ -104,11 +104,11 @@ async def classify_with(messages, prefix):
     user = prefix + classify.render(messages)
     outs = await asyncio.gather(*[chat_json(classify_feat.SYSTEM, user, **kw) for _ in range(classify.VOTES)],
                                 return_exceptions=True)
-    votes = [classify_feat.normalize_flags(out) for out in outs if isinstance(out, dict)]
-    if not votes:
+    outs = [o for o in outs if isinstance(o, dict)]
+    if not outs:
         return {"category": None, "flags": None}
-    flags = {k: sum(vote[k] for vote in votes) * 2 > len(votes) for k in classify_feat.FLAGS}
-    return {**classify_feat.decide(flags), "flags": flags, "votes": len(votes)}
+    flags = {k: sum(o.get(k) is True for o in outs) * 2 > len(outs) for k in classify_feat.FLAGS}
+    return {**classify_feat.decide(flags), "flags": flags, "votes": len(outs)}
 
 
 async def collect(path, variants, split, concurrency):
