@@ -63,10 +63,15 @@ def public_rows():
     return out
 
 
-async def collect(path, k, concurrency):
+async def collect(path, k, concurrency, ids=None):
     from app import classify, classify_feat
     from app.llm import chat_json
     rows = public_rows()
+    if ids is not None:
+        selected_ids = set(ids)
+        rows = [row for row in rows if row["id"] in selected_ids]
+        if not rows or {row["id"] for row in rows} != selected_ids:
+            raise ValueError("수집할 공개 문항 ID를 확인하세요.")
     sem = asyncio.Semaphore(concurrency)
     kw = dict(effort=classify.EFFORT, max_tokens=classify.MAX_TOKENS, timeout=classify.TIMEOUT, hedge_after=7.0,
               kind="classify")
@@ -76,14 +81,26 @@ async def collect(path, k, concurrency):
             t = time.monotonic()
             try:
                 out = await chat_json(classify_feat.SYSTEM, classify.render(r["messages"]), **kw)
-                flags = {f: out.get(f) is True for f in classify_feat.FLAGS}
+                flags = classify_feat.normalize_flags(out)
+                pairs = classify_feat.parse_jailbreak_requests(out)
+                requests = None if pairs is None else [{"target": target, "action": action} for target, action in pairs]
+                intent = classify_feat.jailbreak_intent(out)
+                if intent is None:
+                    has_field = "jailbreak_requests" in out or "jailbreak_intent" in out
+                    intent = "invalid" if has_field else "missing"
             except Exception:  # noqa: BLE001
                 flags = None
-            return {"flags": flags, "latency": round(time.monotonic() - t, 2)}
+                requests = None
+                intent = "error"
+            return {"flags": flags, "jailbreak_intent": intent, "jailbreak_requests": requests,
+                    "latency": round(time.monotonic() - t, 2)}
 
     res = await asyncio.gather(*[asyncio.gather(*[vote(r) for _ in range(k)]) for r in rows])
-    Path(path).write_text(json.dumps([{"id": r["id"], "votes": v} for r, v in zip(rows, res)], ensure_ascii=False),
-                          encoding="utf-8")
+    report = []
+    for row, votes in zip(rows, res):
+        category = decide(majority([ballot["flags"] for ballot in votes]))["category"]
+        report.append({"id": row["id"], "votes": votes, "category": category})
+    Path(path).write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
     print("saved", path, len(rows), "items x", k, "failed votes", sum(x["flags"] is None for v in res for x in v))
 
 
@@ -263,13 +280,19 @@ def thresholds(paths):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--collect")
+    ap.add_argument("--ids", help="쉼표로 구분한 공개 문항 ID로 수집 범위를 제한")
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--concurrency", type=int, default=16)
     ap.add_argument("--eval", nargs="+")
     ap.add_argument("--thresholds", nargs="+")
     a = ap.parse_args()
+    if a.ids is not None and not a.collect:
+        ap.error("--ids는 --collect와 함께 사용해야 합니다.")
     if a.collect:
-        asyncio.run(collect(a.collect, a.k, a.concurrency))
+        if a.k < 1 or a.concurrency < 1:
+            ap.error("투표 수와 동시 실행 수는 1 이상이어야 합니다.")
+        ids = [part.strip() for part in a.ids.split(",")] if a.ids is not None else None
+        asyncio.run(collect(a.collect, a.k, a.concurrency, ids=ids))
     if a.eval:
         evaluate(a.eval)
     if a.thresholds:

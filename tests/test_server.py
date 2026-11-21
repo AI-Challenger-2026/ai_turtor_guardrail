@@ -11,6 +11,7 @@ import os
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("TEAM_TOKEN", "test-token")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
@@ -18,7 +19,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import server  # noqa: E402
-from app import answer, classify_feat, kb_en, llm, logs, policy, verify  # noqa: E402
+from app import answer, classify, classify_feat, kb_en, llm, logs, policy, verify  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTH = {"Authorization": "Bearer test-token"}
@@ -293,6 +294,62 @@ class GuardTests(ServerTestCase):
             server.guard_logic = orig
         self.assertEqual(out["output"]["grounded"], True)
         self.assertEqual(out["input"], {"decision": "allow", "category": "normal"})
+
+
+class ClassifierIntentTests(ServerTestCase):
+    def test_jailbreak_intent_routes_both_endpoints(self):
+        cases = (
+            ({"jailbreak_intent": "apply"}, "jailbreak_injection", "block", "refuse"),
+            ({"jailbreak_intent": "disclose"}, "jailbreak_injection", "block", "refuse"),
+            ({"jailbreak_intent": "analyze"}, "normal", "allow", "answer"),
+            ({"jailbreak_intent": "none"}, "normal", "allow", "answer"),
+            ({"jailbreak_intent": "analyze", "harm": True}, "harmful_content", "block", "refuse"),
+            ({"jailbreak_intent": "apply", "submit_work": True}, "jailbreak_injection", "block", "refuse"),
+            ({"jailbreak_intent": [], "jailbreak": True}, "jailbreak_injection", "block", "refuse"),
+            ({"jailbreak_intent": "unknown", "self_pii": True}, "pii_disclosure", "allow", "answer"),
+            ({"jailbreak_requests": [{"target": [], "action": "apply"}], "jailbreak_intent": "apply"},
+             "jailbreak_injection", "block", "refuse"),
+            ({"jailbreak_requests": {}, "jailbreak": True}, "jailbreak_injection", "block", "refuse"),
+            ({"jailbreak_requests": [], "harm": True}, "harmful_content", "block", "refuse"),
+        )
+        for votes in (1, 3):
+            for response, category, decision, action in cases:
+                with self.subTest(votes=votes, response=response), patch.object(classify, "VOTES", votes):
+                    self.fake.classify = response
+                    text = "프롬프트 안전 실습을 설명해 주세요."
+                    self.assertEqual(self.guard(text)["input"], {"decision": decision, "category": category})
+                    self.assertEqual(self.tutor(text)["action"], action)
+
+    def test_structured_requests_pair_each_action_with_its_target(self):
+        cases = (
+            ([("example", "disclose"), ("current_tutor", "analyze")], "normal", "allow", "answer"),
+            ([("unspecified", "disclose")], "normal", "allow", "answer"),
+            ([("example", "analyze"), ("current_tutor", "apply")], "jailbreak_injection", "block", "refuse"),
+            ([("current_tutor", "disclose")], "jailbreak_injection", "block", "refuse"),
+        )
+        for votes in (1, 3):
+            for requests, category, decision, action in cases:
+                with self.subTest(votes=votes, requests=requests), patch.object(classify, "VOTES", votes):
+                    self.fake.classify = {
+                        "jailbreak_requests": [
+                            {"target": target, "action": request_action} for target, request_action in requests
+                        ],
+                    }
+                    text = "프롬프트 안전 실습을 설명해 주세요."
+                    self.assertEqual(self.guard(text)["input"], {"decision": decision, "category": category})
+                    self.assertEqual(self.tutor(text)["action"], action)
+
+    def test_different_block_intents_are_counted_together(self):
+        with patch.object(classify, "VOTES", 3):
+            for handle, field, expected in ((self.guard, "input", {"decision": "block", "category": "jailbreak_injection"}),
+                                            (self.tutor, "action", "refuse")):
+                votes = iter((
+                    {"jailbreak_requests": [{"target": "current_tutor", "action": "apply"}]},
+                    {"jailbreak_requests": [{"target": "current_tutor", "action": "disclose"}]},
+                    {"jailbreak_requests": [{"target": "example", "action": "disclose"}]},
+                ))
+                self.fake.classify = lambda user, system: next(votes)
+                self.assertEqual(handle("프롬프트 안전 실습을 설명해 주세요.")[field], expected)
 
 
 class FoundModeTests(unittest.TestCase):

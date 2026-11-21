@@ -46,6 +46,7 @@
     answer 모드의 found 답변 끝에는 1위 섹션 원문 문장(최대 2개, `app/excerpt.py`, `EXCERPT` 기본 1)을 붙인다(우리가 더함).
   - /guard: 분류, 후보 답변 검증, 자료 확인(생성기 found)을 동시에. off_topic + found → normal. block이면 후보 답변 `{grounded: true, [], safe: false}`, allow면 검증 구간(없으면 grounded). 후보 답변 없이 normal인데 found=false면 out_of_material(decision은 allow).
 - `app/classify.py` + `app/classify_feat.py`: 예/아니오 신호 9개(self_pii, distress, jailbreak, harm, hate, submit_work, answer_only, off_topic, low_signal)를 3회 동시 판정, 신호별 과반 → 코드 우선순위 규칙으로 범주. 프롬프트 예시는 팀원이 쓴 문장(공개 문항 아님). 모두 실패하면 normal(flags 없음). low, 시도당 20초, 7초 헤지.
+  - v4에서 시험한 근거 유형과 인용 구절의 일치를 추가 차단 조건으로 다시 적용하지 않는다. 오차단 감소 없이 놓친 차단 대상이 늘어 v3로 복원했다. [v4 실패와 v3 복원 기록](Progress.md#v4-근거-확인-방식-실패와-v3-복원)
 - `app/answer.py`: 생성 프롬프트(concise_full: 근거 문장을 통째로 옮김), 모드 answer/scaffold/academic. 힌트·대필 문구(우리가 바꿈, `HINT_PROMPT` 기본 clean, v3이면 final-v3): 첫 문장을 그대로 주고, 이 모드에서는 answer 모드의 found 규칙을 보이지 않는다. `{"evidence","found","answer"}`, evidence가 보여 준 섹션이 아니면 found=false. 9초 헤지.
   자료 없음 답변(우리가 더함, `FOUND_MODE` 기본 plain, model이면 final-v3 문구): answer 모드에서 found=false 답변에 자료의 값·규칙·이름을 덧붙이지 않는다(abstain은 인용이 없어 덧붙인 사실이 근거 없음으로 판정됨).
 - `app/verify.py`: 후보 답변의 과목 고유 사실 주장을 자료(후보 답변 가중 검색 상위 4섹션)와 대조, contradict·absent의 wrong_part를 구간으로. 후보 답변에 없는 구간, 응대·안내 문장(`_NON_CLAIM`)에 걸린 구간은 버린다.
@@ -93,6 +94,24 @@ python3 eval/log_summary.py logs/8000.log --last-run
   - (엔드포인트, 묶음 범주 조합)으로 층화, 고정 seed.
 - 평가용(`dev`) 문항은 프롬프트에 넣지 않는다. 우리가 더하는 변경은 조정용 세트로 맞추고 평가용은 확인에만 쓴다.
 - final-v3는 작성자가 공개 400건 전체로 조정했으므로 평가용 분할 점수가 실제보다 낙관적이다. 이전 우리 버전(평가용 5회 평균 87.50)과 절대값을 비교하지 말고, final-v3 위에 얹은 변경끼리 비교한다.
+
+### Windows에서 v3 공개 400문항 10회 채점
+
+환경 변수가 등록된 PowerShell에서 실행한다. 복원된 코드를 로드하도록 서버를 재시작하고, 시작이 완료되면 두 번째 터미널에서 채점한다.
+
+```powershell
+$env:CLASSIFY_MODE = 'feat'
+$env:CLASSIFY_VOTES = '3'
+.\.venv\Scripts\python.exe -B -m uvicorn server:app --host 127.0.0.1 --port 8000 --no-access-log
+```
+
+```powershell
+& .\.venv\Scripts\python.exe -I -B .\harness\score_public_batches.py
+```
+
+작업자 64개로 10회차를 순서대로 실행하고, 채점 사이에 20초 대기한다. 각 결과를 `logs/score-v3-…-r01.json`부터 `r10.json`까지 순서대로 저장한 뒤 회차 완료를 표시한다. 종료 시 전체 소요 시간과 완료·중단 상태를 표시한다.
+
+중단된 묶음은 출력된 묶음 이름을 `--batch-stem`에 전달해 이어서 채점한다. 앞선 회차의 리포트가 완전하면 재사용한다.
 
 ## 5. 기준선
 

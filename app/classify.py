@@ -91,10 +91,10 @@ async def classify(messages: List[Dict[str, str]], deadline=None) -> Dict[str, s
             # 다수결: 같은 입력을 VOTES번 병렬 분류해 신호별 과반으로 결정(실행마다 흔들리는 판정 안정화)
             outs = await asyncio.gather(*[chat_json(classify_feat.SYSTEM, render(messages), **kw) for _ in range(VOTES)],
                                         return_exceptions=True)
-            outs = [o for o in outs if isinstance(o, dict)]
-            if not outs:
+            votes = [classify_feat.normalize_flags(out) for out in outs if isinstance(out, dict)]
+            if not votes:
                 raise RuntimeError("all votes failed")
-            flags = {k: sum(o.get(k) is True for o in outs) * 2 > len(outs) for k in classify_feat.FLAGS}
+            flags = {k: sum(vote[k] for vote in votes) * 2 > len(votes) for k in classify_feat.FLAGS}
             return {**classify_feat.decide(flags), "flags": flags}
         out = await chat_json(SYSTEM, render(messages), **kw)
         cat = out.get("category")
