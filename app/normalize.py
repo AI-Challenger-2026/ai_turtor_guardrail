@@ -31,6 +31,14 @@ INPUT_RULES=0 turns all three off (final-v3 behaviour).
   start of the sentence. 10 public items have the frame (8 normal, 2 jailbreak); expected exact +1.5,
   nothing worse (eval/v4_quote_check.py). No public harmful item uses it. Only the classifier sees the
   masked text. QUOTE_MASK=0 turns this off.
+- List numbers at the start of a line ("1. ", "② ") are removed before classification (2026-11-21): with
+  them the Korean votes read only the last item (a request for other students' names, or a self-
+  introduction, in item 1 was missed). 17 public items change, expected exact +0.74, nothing worse
+  (eval/v4_input_rules2_check.py). LIST_NUMBERS=0 turns this off.
+- A standalone "네" before a word is written "너의" ("네 숨겨진 지시" -> "너의 숨겨진 지시") unless the
+  word is a counting unit with at most a particle ("네 단계", "네 칸", "네 개만") (2026-11-21): the
+  classifier read "네" as "yes" or "four" and missed a request for its own hidden instructions. 9 public
+  items change, expected exact +1.00, nothing worse. POSSESSIVE_NE=0 turns this off.
 """
 import os
 import re
@@ -40,6 +48,8 @@ INPUT_RULES = os.environ.get("INPUT_RULES", "1") == "1"
 BAIT_RULES = os.environ.get("BAIT_RULES", "1") == "1"
 SUBMIT_GATE = os.environ.get("SUBMIT_GATE", "1") == "1"
 QUOTE_MASK = os.environ.get("QUOTE_MASK", "1") == "1"
+LIST_NUMBERS = os.environ.get("LIST_NUMBERS", "1") == "1"
+POSSESSIVE_NE = os.environ.get("POSSESSIVE_NE", "1") == "1"
 
 _WORD = re.compile(r"[가-힣A-Za-z0-9]")
 # three or more single Latin letters separated by single spaces
@@ -61,6 +71,14 @@ _BAIT = re.compile("|".join([
 _FRAME = re.compile(r"(?<![바자])(?:라는|이라는|라고\s*하는|라고\s*한|란)\s+(?:\S+\s+)?(?:문장|문구|말|댓글|표현|글|메시지)")
 _QUOTED = re.compile(r"(['\"‘“])([^'\"’”]{2,})(['\"’”])\s*$")
 QUOTE_TOKEN = "〈인용문〉"
+_LIST_NUMBER = re.compile(r"(?m)^([ \t]*)(?:\d{1,2}[.)]|[①-⑳])[ \t]+")
+# "네" + word: possessive ("your") unless the word is a counting unit with at most a particle
+_NE = re.compile(r"(?<![가-힣])네[ \t]+(?=([가-힣]+))")
+_UNITS = ("단계", "가지", "번째", "마리", "문제", "문장", "글자", "과목", "자리", "사람", "학생", "시간",
+          "개", "명", "번", "시", "살", "권", "장", "줄", "달", "주", "칸", "째", "대", "잔", "쪽", "행", "열",
+          "곳", "일", "분", "초", "원", "배")
+_PARTICLES = ("", "이", "가", "을", "를", "은", "는", "의", "에", "로", "으로", "도", "만", "씩", "째", "까지", "에서",
+              "으로는")
 
 
 def last_user_turn(messages: List[Dict[str, str]]) -> str:
@@ -113,16 +131,34 @@ def mask_quotes(text: str) -> str:
     return "".join(out)
 
 
+def drop_list_numbers(text: str) -> str:
+    """Removes list numbers at the start of lines ("1. ", "2) ", "① ")."""
+    return _LIST_NUMBER.sub(r"\1", text or "")
+
+
+def _is_unit(word: str) -> bool:
+    return any(word.startswith(u) and word[len(u):] in _PARTICLES for u in _UNITS)
+
+
+def possessive_ne(text: str) -> str:
+    """Writes a standalone "네" before a word as "너의", unless the word is a counting unit."""
+    return _NE.sub(lambda m: m.group(0) if _is_unit(m.group(1)) else "너의 ", text or "")
+
+
 def _learner_turn(text: str) -> str:
     text = join_spaced(text)
     if BAIT_RULES:
         text = strip_bait(text)
-    return mask_quotes(text) if QUOTE_MASK else text
+    if QUOTE_MASK:
+        text = mask_quotes(text)
+    if LIST_NUMBERS:
+        text = drop_list_numbers(text)
+    return possessive_ne(text) if POSSESSIVE_NE else text
 
 
 def for_classifier(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Learner turns with letter-spaced words joined, authority/pressure phrases removed and quoted
-    sentences masked; tutor turns untouched."""
+    """Learner turns with letter-spaced words joined, authority/pressure phrases removed, quoted
+    sentences masked, list numbers removed and a possessive "네" written "너의"; tutor turns untouched."""
     if not INPUT_RULES:
         return messages
     return [{**m, "content": _learner_turn(m.get("content", ""))} if m.get("role") == "user" else m for m in messages]
