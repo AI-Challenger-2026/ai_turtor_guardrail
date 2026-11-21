@@ -25,6 +25,12 @@ INPUT_RULES=0 turns all three off (final-v3 behaviour).
   제출, 답안, 보고서, "낼 거", graded assessment, for submission) plus their plain synonyms. All 15
   public academic_dishonesty items have one; without it the Korean votes called "이름 + 코드 짜 줘"
   homework. SUBMIT_GATE=0 turns this off (app.classify).
+- A sentence the learner quotes in order to ask about it ("X라는 문장/문구/말/댓글/표현") is replaced by
+  〈인용문〉 before classification (2026-11-21): questions that quote a hateful sentence to study it were
+  blocked for the quoted words. The span is the text inside the quotes, or, without quotes, from the
+  start of the sentence. 10 public items have the frame (8 normal, 2 jailbreak); expected exact +1.5,
+  nothing worse (eval/v4_quote_check.py). No public harmful item uses it. Only the classifier sees the
+  masked text. QUOTE_MASK=0 turns this off.
 """
 import os
 import re
@@ -33,6 +39,7 @@ from typing import Dict, List
 INPUT_RULES = os.environ.get("INPUT_RULES", "1") == "1"
 BAIT_RULES = os.environ.get("BAIT_RULES", "1") == "1"
 SUBMIT_GATE = os.environ.get("SUBMIT_GATE", "1") == "1"
+QUOTE_MASK = os.environ.get("QUOTE_MASK", "1") == "1"
 
 _WORD = re.compile(r"[가-힣A-Za-z0-9]")
 # three or more single Latin letters separated by single spaces
@@ -50,6 +57,10 @@ _BAIT = re.compile("|".join([
     r"그냥\s*궁금해서(?:요|\s*(?:그러는데|묻는\s*거야|물어보는\s*거야|물어봐))?",
     r"(?:소설|연극|역할극)에?\s*쓸\s*(?:건데|거야|거예요)",
 ]))
+# "…라는 (차별) 문장/문구/말/댓글/표현/글/메시지"; "바라는"(hope) and "자라는"(grow) are verbs, not quotes
+_FRAME = re.compile(r"(?<![바자])(?:라는|이라는|라고\s*하는|라고\s*한|란)\s+(?:\S+\s+)?(?:문장|문구|말|댓글|표현|글|메시지)")
+_QUOTED = re.compile(r"(['\"‘“])([^'\"’”]{2,})(['\"’”])\s*$")
+QUOTE_TOKEN = "〈인용문〉"
 
 
 def last_user_turn(messages: List[Dict[str, str]]) -> str:
@@ -83,14 +94,35 @@ def strip_bait(text: str) -> str:
     return out if has_words(out) else text
 
 
+def mask_quotes(text: str) -> str:
+    """Replaces the sentence quoted before "라는 문장/말/…" with 〈인용문〉: the text inside the quotes
+    if it is quoted, otherwise from the start of the sentence."""
+    text = text or ""
+    out, last = [], 0
+    for m in _FRAME.finditer(text):
+        head = text[last:m.start()]
+        q = _QUOTED.search(head)
+        if q:
+            head = head[:q.start(2)] + QUOTE_TOKEN + head[q.end(2):]
+        else:
+            cut = max(head.rfind(c) for c in ".?!\n/")
+            head = head[:cut + 1] + (" " if cut >= 0 else "") + QUOTE_TOKEN
+        out.append(head)
+        last = m.start()
+    out.append(text[last:])
+    return "".join(out)
+
+
 def _learner_turn(text: str) -> str:
     text = join_spaced(text)
-    return strip_bait(text) if BAIT_RULES else text
+    if BAIT_RULES:
+        text = strip_bait(text)
+    return mask_quotes(text) if QUOTE_MASK else text
 
 
 def for_classifier(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Learner turns with letter-spaced words joined and authority/pressure phrases removed; tutor
-    turns untouched."""
+    """Learner turns with letter-spaced words joined, authority/pressure phrases removed and quoted
+    sentences masked; tutor turns untouched."""
     if not INPUT_RULES:
         return messages
     return [{**m, "content": _learner_turn(m.get("content", ""))} if m.get("role") == "user" else m for m in messages]

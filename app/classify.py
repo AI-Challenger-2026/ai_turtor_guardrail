@@ -153,7 +153,7 @@ async def classify(messages: List[Dict[str, str]], deadline=None, tutor: bool = 
         return {**classify_feat.decide(flags), "flags": flags}
     submission = normalize.mentions_submission(messages)  # gate for submit_work
     shares = {"submit_work": TUTOR_SUBMIT_SHARE} if tutor and TUTOR_SUBMIT_SHARE > 0 else {}
-    messages = normalize.for_classifier(messages)  # letter-spaced words joined, pressure phrases removed
+    messages = normalize.for_classifier(messages)  # spaced words joined, pressure phrases removed, quotes masked
     try:
         kw = dict(effort=EFFORT, max_tokens=MAX_TOKENS, timeout=TIMEOUT, deadline=deadline, hedge_after=7.0,
                   kind="classify")
