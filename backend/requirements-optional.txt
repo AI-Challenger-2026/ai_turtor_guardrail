@@ -1,6 +1,0 @@
-# 선택 의존성 (optional) — 필요할 때만 설치한다.
-# 다국어 임베딩 기반 dense 검색 (hybrid retrieval). configs/settings.yaml 의 retrieval.dense.enabled: true 와 함께 사용.
-sentence-transformers>=3.0
-numpy>=1.26
-# PDF 교재 로딩 (PDF loader)
-pypdf>=4.0
